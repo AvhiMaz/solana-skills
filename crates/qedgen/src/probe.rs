@@ -70,6 +70,11 @@ pub enum Category {
     /// is constant. Recurring shape across multisig, escrow, lending,
     /// and percolator audits.
     StoredFieldNeverWritten,
+    /// Coverage-guided fuzz crash — Crucible found an action sequence
+    /// that violates a spec invariant or triggers a runtime abort.
+    /// Distinct from the pattern-match categories above: those flag
+    /// structural risks; this one carries concrete path evidence.
+    CrucibleFuzzCrash,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -144,6 +149,62 @@ pub enum Reproducer {
         /// filling the TODOs.
         needs_fill: bool,
     },
+    /// Coverage-guided fuzz crash discovered by Crucible (v2.18). The
+    /// reproducer is the on-disk crash blob produced by `crucible run`
+    /// plus the minimized action sequence after auto-`tmin`. Run
+    /// `crucible show <harness_dir> <crash_path> --replay` to re-fire
+    /// the bug deterministically.
+    Crucible {
+        /// Path to the harness root directory (e.g. `fuzz/escrow`),
+        /// relative to project root.
+        harness_path: String,
+        /// Path to the `.meta.json` crash file written by Crucible.
+        crash_path: String,
+        /// Exact CLI invocation that re-runs the minimized crash.
+        invocation: String,
+        /// Action sequence after `crucible tmin` minimization. The list
+        /// is what the user sees in the human render; the full pre-min
+        /// chain stays on disk in `crash_path` for audit.
+        action_sequence: Vec<CrucibleActionRecord>,
+        /// Additional per-seed reproducer paths discovered for the same
+        /// (handler, invariant) pair. Surfaced in JSON so users can
+        /// drill in; one canonical reproducer renders in the human
+        /// output. Empty when no other crash deduplicated into this
+        /// finding.
+        #[serde(skip_serializing_if = "Vec::is_empty", default)]
+        extra_seeds: Vec<String>,
+        /// Crucible binary version captured at run time. Pins the
+        /// reproducer so re-running against a different Crucible build
+        /// surfaces as a version mismatch rather than silent drift.
+        crucible_version: String,
+    },
+}
+
+/// Replica of Crucible's on-disk `<hash>.meta.json` shape — we don't pull
+/// `crucible-fuzz-cli` as a library (heavy LibAFL transitive deps), so we
+/// re-declare the schema with serde. If Crucible changes their format we
+/// detect a parse error and surface a clear hint to re-pin the version.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct CrucibleCrashMetadata {
+    pub test_name: String,
+    pub timestamp: String,
+    pub iteration: u64,
+    #[serde(default)]
+    pub seed: Option<u64>,
+    pub actions: Vec<CrucibleActionRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct CrucibleActionRecord {
+    /// snake_case action name — matches the spec handler's name 1:1.
+    pub name: String,
+    /// JSON of the action's args (preserves `#[range(..)]`-mutated values).
+    pub params: serde_json::Value,
+    /// Whether the handler returned Ok (true) or surfaced a runtime error (false).
+    pub success: bool,
+    /// `Custom(N)` error code when the handler aborted, otherwise None.
+    #[serde(default)]
+    pub error_code: Option<u32>,
 }
 
 /// Captured Kani counterexample. Keeps just enough to let the user

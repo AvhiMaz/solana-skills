@@ -12,6 +12,8 @@ mod chumsky_adapter;
 mod chumsky_parser;
 mod codegen;
 mod consolidate;
+mod crucible_gen;
+mod crucible_probe;
 mod deps;
 mod drift;
 mod fill;
@@ -229,6 +231,33 @@ enum Commands {
         /// `programs/lending` for an Anchor project)
         #[arg(long)]
         root: Option<PathBuf>,
+
+        /// Coverage-guided fuzz probe engine (v2.18). Drives a generated
+        /// Crucible harness for the given budget and converts each crash
+        /// into a Finding with `Reproducer::Crucible`. Different engine
+        /// from the pattern-match predicates above — both can run; both
+        /// emit into the same `findings[]`.
+        ///
+        /// Budget is wall-clock seconds (e.g. `300` for 5 min). Pass `0`
+        /// to disable.
+        #[arg(long)]
+        fuzz: Option<u64>,
+
+        /// Crucible harness directory. Defaults to `./fuzz/<spec_program>`,
+        /// matching `qedgen codegen --crucible` output.
+        #[arg(long)]
+        harness_dir: Option<PathBuf>,
+
+        /// Skip the 30s smoke pre-flight that surfaces same-class bugs
+        /// before burning the full budget on duplicates.
+        #[arg(long)]
+        no_smoke: bool,
+
+        /// Use Crucible's stateful mode (action-chain pool, ~10× throughput).
+        /// Stateless default keeps repros short and reads cleanly; opt
+        /// into stateful once shallow findings are cleared.
+        #[arg(long)]
+        stateful: bool,
     },
 
     /// Scaffold a .qedspec from an Anchor IDL JSON file.
@@ -481,6 +510,27 @@ enum Commands {
         /// a `note: no repros found` placeholder.
         #[arg(long)]
         probe_repros: bool,
+
+        /// Run the Crucible coverage-guided fuzz engine (v2.18). Thin
+        /// alias over `qedgen probe --fuzz <budget>` — wraps the
+        /// findings as a BackendReport so they render through the same
+        /// `format_human` named-counterexample surface as Kani /
+        /// proptest. Value is wall-clock seconds (e.g. 300 = 5 min).
+        #[arg(long)]
+        crucible: Option<u64>,
+
+        /// Harness directory for `--crucible`. Defaults to
+        /// `./fuzz/<spec_program>/`, matching `qedgen codegen --crucible`.
+        #[arg(long)]
+        crucible_harness_dir: Option<PathBuf>,
+
+        /// Skip Crucible's 30s smoke pre-flight before the full run.
+        #[arg(long)]
+        crucible_no_smoke: bool,
+
+        /// Use Crucible's stateful mode (action-chain pool).
+        #[arg(long)]
+        crucible_stateful: bool,
     },
 
     /// Lint one Anchor IDL for mainnet-readiness before first deploy.
@@ -624,6 +674,17 @@ enum Commands {
         /// (default: ./programs/tests/proptest.rs — see --kani-output for why).
         #[arg(long, default_value = "./programs/tests/proptest.rs")]
         proptest_output: PathBuf,
+
+        /// Generate a Crucible coverage-guided fuzz harness (v2.18).
+        /// Anchor target only; sBPF / Pinocchio specs error early.
+        #[arg(long)]
+        crucible: bool,
+
+        /// Parent directory for the generated Crucible harness. The harness
+        /// lives at `<dir>/<program_name>/` (or `<dir>/` when `<dir>` already
+        /// ends with the program name). Default: `./fuzz`.
+        #[arg(long, default_value = "./fuzz")]
+        crucible_output: PathBuf,
 
         /// Generate in-process SVM integration test scaffolds
         #[arg(long)]
@@ -810,6 +871,180 @@ fn require_git_repo() -> anyhow::Result<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// v2.18 P3 alias: wrap a Crucible fuzz-probe run into a single
+/// BackendReport so `qedgen verify --crucible <budget>` renders through
+/// the v2.17 named-counterexample human surface alongside the other
+/// backends. Each finding's action sequence becomes a counterexample;
+/// the harness path lives in BackendReport.detail for context.
+fn crucible_backend_report(
+    spec: &Path,
+    harness_dir: Option<PathBuf>,
+    budget_secs: u64,
+    no_smoke: bool,
+    stateful: bool,
+) -> verify::BackendReport {
+    use std::time::Instant;
+    let start = Instant::now();
+
+    let project_root = spec
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let parsed = match check::parse_spec_file(spec) {
+        Ok(p) => p,
+        Err(e) => {
+            return verify::BackendReport {
+                name: "crucible",
+                status: verify::BackendStatus::Failed,
+                duration_ms: start.elapsed().as_millis(),
+                detail: Some(format!("failed to parse spec: {e}")),
+                log_path: None,
+                counterexamples: Vec::new(),
+            }
+        }
+    };
+    let prog = if parsed.program_name.is_empty() {
+        "program".to_string()
+    } else {
+        // Re-use the snake-case logic via crucible_gen's path: walk chars,
+        // insert `_` before each capital. Lighter version inlined here.
+        let mut out = String::new();
+        let mut prev_lower = false;
+        for c in parsed.program_name.chars() {
+            if c.is_uppercase() {
+                if prev_lower {
+                    out.push('_');
+                }
+                for lc in c.to_lowercase() {
+                    out.push(lc);
+                }
+                prev_lower = false;
+            } else if c == '-' || c == ' ' {
+                out.push('_');
+                prev_lower = false;
+            } else {
+                out.push(c);
+                prev_lower = c.is_lowercase() || c.is_ascii_digit();
+            }
+        }
+        out
+    };
+    let harness = harness_dir.unwrap_or_else(|| project_root.join("fuzz").join(&prog));
+
+    let mut ctx = crucible_probe::FuzzProbeContext::new(spec, project_root, harness.clone());
+    ctx.fuzz_budget = std::time::Duration::from_secs(budget_secs);
+    if no_smoke {
+        ctx.smoke_budget = std::time::Duration::ZERO;
+    }
+    ctx.stateful = stateful;
+
+    let findings = match crucible_probe::run_fuzz_probe(&ctx) {
+        Ok(f) => f,
+        Err(e) => {
+            return verify::BackendReport {
+                name: "crucible",
+                status: verify::BackendStatus::Failed,
+                duration_ms: start.elapsed().as_millis(),
+                detail: Some(format!("crucible run failed: {e:#}")),
+                log_path: None,
+                counterexamples: Vec::new(),
+            }
+        }
+    };
+
+    let duration_ms = start.elapsed().as_millis();
+    let status = if findings.is_empty() {
+        verify::BackendStatus::Passed
+    } else {
+        verify::BackendStatus::Failed
+    };
+
+    let counterexamples = findings
+        .iter()
+        .map(crucible_finding_to_counterexample)
+        .collect::<Vec<_>>();
+
+    let detail = if findings.is_empty() {
+        Some(format!(
+            "no findings in {}s ({} budget). \
+             Pass `--crucible <larger>` to go deeper, or `--crucible-stateful` for chain coverage.",
+            budget_secs, budget_secs
+        ))
+    } else {
+        Some(format!(
+            "{} distinct finding(s). \
+             Replay via `crucible show {} <crash> --replay`.",
+            findings.len(),
+            harness.display(),
+        ))
+    };
+
+    verify::BackendReport {
+        name: "crucible",
+        status,
+        duration_ms,
+        detail,
+        log_path: None,
+        counterexamples,
+    }
+}
+
+/// Map a Crucible Finding into the structured Counterexample shape the
+/// v2.17 human renderer consumes. Action sequence flattens to one
+/// (name, value) row per action, plus a leading row for the violation
+/// category.
+fn crucible_finding_to_counterexample(f: &probe::Finding) -> verify_counterexample::Counterexample {
+    use verify_counterexample::{Counterexample, CounterexampleVar};
+    let mut assignments = Vec::new();
+    assignments.push(CounterexampleVar {
+        name: "category".to_string(),
+        value: f.category_tag.clone(),
+        line: None,
+    });
+    if let Some(probe::Reproducer::Crucible {
+        action_sequence,
+        crucible_version,
+        ..
+    }) = &f.reproducer
+    {
+        for (i, action) in action_sequence.iter().enumerate() {
+            assignments.push(CounterexampleVar {
+                name: format!("action[{}]", i),
+                value: format!(
+                    "{}({}){}",
+                    action.name,
+                    serde_json::to_string(&action.params).unwrap_or_default(),
+                    action
+                        .error_code
+                        .map(|c| format!(" → Custom({})", c))
+                        .unwrap_or_else(|| if action.success {
+                            " → ok".into()
+                        } else {
+                            " → fail".into()
+                        }),
+                ),
+                line: None,
+            });
+        }
+        assignments.push(CounterexampleVar {
+            name: "crucible_version".to_string(),
+            value: crucible_version.clone(),
+            line: None,
+        });
+    }
+    Counterexample {
+        harness: format!("{} ({})", f.handler, f.category_tag),
+        status: "failed".to_string(),
+        assignments,
+        seed: None,
+        failure_message: Some(f.spec_silent_on.clone()),
+        source_location: f.reproducer.as_ref().and_then(|r| match r {
+            probe::Reproducer::Crucible { crash_path, .. } => Some(crash_path.clone()),
+            _ => None,
+        }),
+    }
 }
 
 /// Expand the committed CI template by substituting `{{VERIFY_STEP}}`
@@ -1091,7 +1326,71 @@ async fn main() -> Result<()> {
             spec,
             bootstrap,
             root,
+            fuzz,
+            harness_dir,
+            no_smoke,
+            stateful,
         } => {
+            // v2.18: --fuzz drives the Crucible engine. Different engine
+            // from the pattern-match predicates that run when --fuzz is
+            // absent — both produce Findings into the same surface, so
+            // a user wanting both should run probe twice (once with,
+            // once without) and merge JSON. v2.18.1 may merge them in a
+            // single invocation if real eval data warrants it.
+            if let Some(budget_secs) = fuzz {
+                let spec_path = spec.clone().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "--fuzz requires --spec <path> (spec-less fuzz isn't supported yet)"
+                    )
+                })?;
+                let project_root = spec_path
+                    .parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| std::path::PathBuf::from("."));
+                let parsed = check::parse_spec_file(&spec_path)?;
+                let prog = if parsed.program_name.is_empty() {
+                    "program".to_string()
+                } else {
+                    parsed
+                        .program_name
+                        .chars()
+                        .map(|c| {
+                            if c.is_uppercase() {
+                                format!("_{}", c.to_lowercase())
+                            } else {
+                                c.to_string()
+                            }
+                        })
+                        .collect::<String>()
+                        .trim_start_matches('_')
+                        .to_string()
+                };
+                let harness = harness_dir
+                    .clone()
+                    .unwrap_or_else(|| project_root.join("fuzz").join(&prog));
+                let mut ctx =
+                    crucible_probe::FuzzProbeContext::new(&spec_path, project_root, harness);
+                ctx.fuzz_budget = std::time::Duration::from_secs(budget_secs);
+                if no_smoke {
+                    ctx.smoke_budget = std::time::Duration::ZERO;
+                }
+                ctx.stateful = stateful;
+                let findings = crucible_probe::run_fuzz_probe(&ctx)?;
+                let output = probe::ProbeOutput {
+                    version: 1,
+                    mode: probe::Mode::SpecAware,
+                    spec_path: Some(spec_path.display().to_string()),
+                    project_root: None,
+                    runtime: None,
+                    handlers: None,
+                    applicable_categories: None,
+                    findings,
+                };
+                println!("{}", serde_json::to_string_pretty(&output)?);
+                return Ok(());
+            }
+
+            let _ = (harness_dir, no_smoke, stateful);
             let output = if bootstrap {
                 let root = root
                     .ok_or_else(|| anyhow::anyhow!("--bootstrap requires --root <project-path>"))?;
@@ -1526,6 +1825,10 @@ async fn main() -> Result<()> {
             rpc_url,
             offline,
             probe_repros,
+            crucible,
+            crucible_harness_dir,
+            crucible_no_smoke,
+            crucible_stateful,
         } => {
             require_git_repo()?;
 
@@ -1612,7 +1915,23 @@ async fn main() -> Result<()> {
                 }
             };
 
-            let report = verify::run(&opts)?;
+            let mut report = verify::run(&opts)?;
+
+            // v2.18 P3: --crucible is a thin alias over the probe engine.
+            // Findings come back as a Vec<Finding>; we wrap them as a
+            // single BackendReport so they render through the v2.17
+            // format_human named-trace surface alongside Kani/proptest.
+            if let Some(budget_secs) = crucible {
+                let backend = crucible_backend_report(
+                    &spec,
+                    crucible_harness_dir.clone(),
+                    budget_secs,
+                    crucible_no_smoke,
+                    crucible_stateful,
+                );
+                report.backends.push(backend);
+            }
+            let _ = (crucible_harness_dir, crucible_no_smoke, crucible_stateful);
 
             if json {
                 verify::print_json(&report)?;
@@ -1724,6 +2043,8 @@ async fn main() -> Result<()> {
             test_output,
             proptest,
             proptest_output,
+            crucible,
+            crucible_output,
             integration,
             integration_output,
             lean,
@@ -1759,6 +2080,10 @@ async fn main() -> Result<()> {
             }
             if proptest || all {
                 proptest_gen::generate(&spec, &proptest_output)?;
+            }
+            if crucible || all {
+                let parsed = check::parse_spec_file(&spec)?;
+                crucible_gen::generate(&parsed, &crucible_output)?;
             }
             if integration || all {
                 integration_test::generate(&spec, &integration_output)?;

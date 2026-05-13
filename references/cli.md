@@ -334,6 +334,10 @@ $QEDGEN verify --spec my_program.qedspec --check-upstream --offline
 | `--rpc-url` | String | Solana CLI default | Override RPC endpoint passed to `solana program dump --url <rpc>` |
 | `--offline` | bool | false | Refuse to reach the network. Any dep that would require an on-chain fetch reports as Error. CI-gate friendly. |
 | `--probe-repros` | bool | false | Run probe reproducers under `<project>/target/qedgen-repros/` (PLAN-v2.16 D4). Each repro is a Mollusk-driven Rust test asserting a probe finding's bug fires; the verb captures pass/fail per finding so the auditor / next probe invocation can drop findings whose repros didn't reproduce. Pre-populated repros (v3-pending) — emits `note: no repros found` placeholder until the agent-fill workflow lands. |
+| `--crucible` | u64 | none | Run the coverage-guided fuzz engine for the given wall-clock seconds. Thin alias over `probe --fuzz` — folds findings into the BackendReport so they render through the same named-trace human surface as Kani / proptest. |
+| `--crucible-harness-dir` | Path | `./fuzz/<prog>/` | Harness directory for `--crucible`. |
+| `--crucible-no-smoke` | bool | false | Skip the 30s smoke pre-flight. |
+| `--crucible-stateful` | bool | false | Stateful action-chain mode for `--crucible`. |
 
 ### `probe`
 Probe a `.qedspec` for category-coverage gaps (spec-aware mode) or
@@ -359,6 +363,10 @@ $QEDGEN probe --bootstrap --root programs/my_program
 | `--spec` | Path | optional | Path to `.qedspec` (spec-aware mode) — conflicts with `--bootstrap` |
 | `--bootstrap` | bool | false | Spec-less mode — walk a project root and emit the auditor work list. Requires `--root`. |
 | `--root` | Path | optional | Project root for spec-less mode (the program crate dir) |
+| `--fuzz` | u64 | none | Wall-clock seconds. Runs the coverage-guided fuzz engine alongside (or instead of) the pattern-match predicates. Requires `--spec`. Findings come back in the same `findings[]` with `category: crucible_fuzz_crash` and a `Reproducer::Crucible`. |
+| `--harness-dir` | Path | `./fuzz/<prog>/` | Crucible harness directory. Matches `codegen --crucible` output. |
+| `--no-smoke` | bool | false | Skip the 30s smoke pre-flight that stops early on high-rate duplicate findings. |
+| `--stateful` | bool | false | Stateful action-chain mode. Higher throughput, longer crash chains. |
 
 ## Code generation
 
@@ -402,6 +410,8 @@ $QEDGEN codegen --ci
 | `--test-output` | Path | `./programs/src/tests.rs` | Unit test output path |
 | `--proptest` | bool | false | Generate proptest harnesses |
 | `--proptest-output` | Path | `./programs/tests/proptest.rs` | Proptest output path. Lives inside the program package (see `--kani-output`). |
+| `--crucible` | bool | false | Generate a coverage-guided fuzz harness (v2.18). Anchor target only; sBPF / Pinocchio specs error early. Output is a self-contained `fuzz/<prog>/` directory with `Cargo.toml`, `src/main.rs` (the harness), and `idls/`. Action-body `accounts::X { ... }` literals emit as `todo!()` for agent-fill (same as handler bodies). |
+| `--crucible-output` | Path | `./fuzz` | Parent directory for the generated harness. Final tree lives at `<dir>/<prog>/`. |
 | `--integration` | bool | false | Generate in-process SVM integration tests |
 | `--integration-output` | Path | `./src/integration_tests.rs` | Integration test output path |
 | `--ci` | bool | false | Generate GitHub Actions CI workflow |

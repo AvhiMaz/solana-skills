@@ -56,6 +56,7 @@ npx skills add qedgen/solana-skills
 | **CPI correctness** | Correct program, accounts, flags, and discriminator for each invocation (axiomatic, pure `rfl`) |
 | **State machines** | Lifecycle correctness, one-shot safety |
 | **Conservation** | Named `invariant`s and `property`s preserved (or `establishes`-ed) across operations. Per-handler proptest + Kani harnesses fire when the body has a Rust rendering; Lean theorems back the proofs. |
+| **Fuzz-discovered paths** | Coverage-guided fuzzer (`qedgen codegen --crucible` + `qedgen probe --fuzz`) drives the deployed `.so` with mutated typed-action sequences. Crashes auto-`tmin` to minimal reproducers, dedupe by `(handler, outcome)`, and surface via `qedgen verify --crucible` with action-sequence counterexamples. |
 | **Arithmetic safety** | Overflow/underflow for fixed-width integers, U64 bounds |
 | **Input validation** | Account count, duplicates, data length, discriminators, parameter bounds — each guard maps to a specific error exit |
 | **Memory correctness** | Stack/heap disjointness, pointer arithmetic (sBPF) |

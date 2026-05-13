@@ -92,7 +92,16 @@ Step 5. Verify generated backends.
 $QEDGEN verify --spec program.qedspec --proptest
 $QEDGEN verify --spec program.qedspec --kani
 $QEDGEN verify --spec program.qedspec --lean
+$QEDGEN verify --spec program.qedspec --crucible 300   # coverage-guided fuzz (5 min)
 ```
+
+The Crucible fuzz path is a separate engine: it drives the deployed `.so`
+with mutated typed-action sequences and crashes from real execution. Run
+`$QEDGEN probe --spec program.qedspec --fuzz 300` to get the JSON
+findings list directly, or `--crucible 300` on verify to fold them into
+the BackendReport. First-time setup needs `crucible` on PATH (see
+`references/cli.md`) plus a built harness (`codegen --crucible`) with
+its action-body `todo!()` sites filled.
 
 Failing harnesses surface with spec-named values (the binder name from the spec, not `var_3`):
 

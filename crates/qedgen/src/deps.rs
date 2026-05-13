@@ -46,6 +46,23 @@ pub fn require_kani() -> Result<()> {
     );
 }
 
+/// Check that `crucible` (Crucible coverage-guided fuzzer) is available.
+/// Called before any command that needs to run a fuzz harness.
+pub fn require_crucible() -> Result<()> {
+    if Command::new("crucible").arg("--version").output().is_ok() {
+        return Ok(());
+    }
+    bail!(
+        "Crucible fuzzer not found. Required for `qedgen probe --fuzz` and `qedgen verify --crucible`.\n\n\
+         Install Crucible:\n\
+         \n\
+           cargo install --git https://github.com/asymmetric-research/crucible crucible-fuzz-cli\n\
+         \n\
+         Crucible is alpha software pinned to Solana v3 + Anchor 1.0.1. The first\n\
+         build of a fuzz harness can take 2-5 minutes (LibAFL is a heavy dep tree).\n"
+    );
+}
+
 /// True if the harness file uses the z3 SMT solver anywhere
 /// (`#[kani::solver(bin = "z3")]`). Factored out so the preflight and
 /// tests share one marker definition.

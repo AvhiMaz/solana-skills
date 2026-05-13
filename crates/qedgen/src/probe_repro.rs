@@ -157,6 +157,15 @@ pub fn construct_reproducer(
         Category::PermissionlessStateWriter => construct_permissionless_state_writer(finding, ctx),
         Category::InitWithoutPda => construct_init_without_pda(finding, ctx),
         Category::StoredFieldNeverWritten => construct_stored_field_never_written(finding, ctx),
+        Category::CrucibleFuzzCrash => {
+            // Crucible findings construct their own reproducers in
+            // `crucible_probe.rs` — they don't flow through this
+            // pattern-match dispatcher. If a finding with this category
+            // reaches `construct_reproducer`, it means the upstream
+            // pipeline didn't attach the Reproducer::Crucible at probe
+            // time. Drop with a clear failure.
+            Err(ConstructFailure::NotImplemented)
+        }
     }
 }
 
