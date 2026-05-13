@@ -100,8 +100,17 @@ with mutated typed-action sequences and crashes from real execution. Run
 `$QEDGEN probe --spec program.qedspec --fuzz 300` to get the JSON
 findings list directly, or `--crucible 300` on verify to fold them into
 the BackendReport. First-time setup needs `crucible` on PATH (see
-`references/cli.md`) plus a built harness (`codegen --crucible`) with
-its action-body `todo!()` sites filled.
+`references/cli.md`) plus a built harness from `codegen --crucible`.
+
+After `codegen --crucible`, the generated `fuzz/<prog>/src/main.rs`
+contains one `todo!("agent-fill: accounts::X { ... } from spec accounts
+block")` site per handler. Fill these directly — no `--fill` flag.
+The agent reads the spec's `accounts` block for the handler, cross-
+references the program's Anchor `Context<X>` struct (or the IDL JSON
+the user drops at `idls/<prog>.json`), and constructs the literal in
+place. Then run `cargo build --features invariant_test` in the harness
+dir and iterate on any compile errors. The IDL is auto-discovered from
+`target/idl/<prog>.json` when present; drop it there before the build.
 
 Failing harnesses surface with spec-named values (the binder name from the spec, not `var_3`):
 
