@@ -34,45 +34,49 @@ struct State {
 }
 
 /// Proptest strategy for generating arbitrary State values.
-fn arb_state() -> impl Strategy<Value = State> {
-    (
-        0u8..=255u8,
-        0u8..=255u8,
-        prop::collection::vec(prop::array::uniform32(0u8..), 32..=32).prop_map(|v| v.try_into().ok().unwrap()),
-        prop::collection::vec(0u8..=255u8, 32..=32).prop_map(|v| v.try_into().ok().unwrap()),
-        0u8..=255u8,
-        0u8..=255u8,
-        prop_oneof![Just(Status::Uninitialized), Just(Status::Active), Just(Status::HasProposal)],
-    ).prop_map(|(threshold, member_count, members, voted, approval_count, rejection_count, status)| State {
-        threshold,
-        member_count,
-        members,
-        voted,
-        approval_count,
-        rejection_count,
-        status,
-    })
+prop_compose! {
+    fn arb_state()(
+        threshold in 0u8..=255u8,
+        member_count in 0u8..=255u8,
+        members in prop::collection::vec(prop::array::uniform32(0u8..), 32..=32).prop_map(|v| v.try_into().ok().unwrap()),
+        voted in prop::collection::vec(0u8..=255u8, 32..=32).prop_map(|v| v.try_into().ok().unwrap()),
+        approval_count in 0u8..=255u8,
+        rejection_count in 0u8..=255u8,
+        status in prop_oneof![Just(Status::Uninitialized), Just(Status::Active), Just(Status::HasProposal)],
+    ) -> State {
+        State {
+            threshold,
+            member_count,
+            members,
+            voted,
+            approval_count,
+            rejection_count,
+            status,
+        }
+    }
 }
 
 /// Boundary-biased strategy for guard rejection tests.
-fn arb_boundary_state() -> impl Strategy<Value = State> {
-    (
-        prop_oneof![0u8..=3u8, 252u8..=255u8],
-        prop_oneof![0u8..=3u8, 252u8..=255u8],
-        prop::collection::vec(prop::array::uniform32(0u8..1u8), 32..=32).prop_map(|v| v.try_into().ok().unwrap()),
-        prop::collection::vec(prop_oneof![0u8..=3u8, 252u8..=255u8], 32..=32).prop_map(|v| v.try_into().ok().unwrap()),
-        prop_oneof![0u8..=3u8, 252u8..=255u8],
-        prop_oneof![0u8..=3u8, 252u8..=255u8],
-        prop_oneof![Just(Status::Uninitialized), Just(Status::Active), Just(Status::HasProposal)],
-    ).prop_map(|(threshold, member_count, members, voted, approval_count, rejection_count, status)| State {
-        threshold,
-        member_count,
-        members,
-        voted,
-        approval_count,
-        rejection_count,
-        status,
-    })
+prop_compose! {
+    fn arb_boundary_state()(
+        threshold in prop_oneof![0u8..=3u8, 252u8..=255u8],
+        member_count in prop_oneof![0u8..=3u8, 252u8..=255u8],
+        members in prop::collection::vec(prop::array::uniform32(0u8..1u8), 32..=32).prop_map(|v| v.try_into().ok().unwrap()),
+        voted in prop::collection::vec(prop_oneof![0u8..=3u8, 252u8..=255u8], 32..=32).prop_map(|v| v.try_into().ok().unwrap()),
+        approval_count in prop_oneof![0u8..=3u8, 252u8..=255u8],
+        rejection_count in prop_oneof![0u8..=3u8, 252u8..=255u8],
+        status in prop_oneof![Just(Status::Uninitialized), Just(Status::Active), Just(Status::HasProposal)],
+    ) -> State {
+        State {
+            threshold,
+            member_count,
+            members,
+            voted,
+            approval_count,
+            rejection_count,
+            status,
+        }
+    }
 }
 
 /// threshold_bounded: s.threshold ≤ s.member_count ∧ s.threshold > 0
@@ -86,7 +90,7 @@ fn votes_bounded(s: &State) -> bool {
 }
 
 fn create_vault(s: &mut State, threshold: u8, member_count: u8) -> bool {
-    if !((threshold > 0) && (threshold <= member_count) && member_count <= 32) {
+    if !(((threshold > 0) && (threshold <= member_count)) && (member_count <= 32)) {
         return false;
     }
     if s.status != Status::Uninitialized {
@@ -111,7 +115,7 @@ fn propose(s: &mut State) -> bool {
 }
 
 fn approve(s: &mut State, member_index: u8) -> bool {
-    if !(member_index < s.member_count && s.members[(member_index) as usize] == approver && s.voted[(member_index) as usize] == 0) {
+    if !((member_index < s.member_count) && (s.members[(member_index) as usize] == approver) && (s.voted[(member_index) as usize] == 0)) {
         return false;
     }
     if s.status != Status::HasProposal {
@@ -124,7 +128,7 @@ fn approve(s: &mut State, member_index: u8) -> bool {
 }
 
 fn reject(s: &mut State, member_index: u8) -> bool {
-    if !(member_index < s.member_count && s.members[(member_index) as usize] == rejecter && s.voted[(member_index) as usize] == 0) {
+    if !((member_index < s.member_count) && (s.members[(member_index) as usize] == rejecter) && (s.voted[(member_index) as usize] == 0)) {
         return false;
     }
     if s.status != Status::HasProposal {
@@ -137,7 +141,7 @@ fn reject(s: &mut State, member_index: u8) -> bool {
 }
 
 fn execute(s: &mut State, member_index: u8) -> bool {
-    if !(member_index < s.member_count && s.members[(member_index) as usize] == executor && s.approval_count >= s.threshold) {
+    if !((member_index < s.member_count) && (s.members[(member_index) as usize] == executor) && (s.approval_count >= s.threshold)) {
         return false;
     }
     if s.status != Status::HasProposal {
@@ -150,7 +154,7 @@ fn execute(s: &mut State, member_index: u8) -> bool {
 }
 
 fn cancel_proposal(s: &mut State) -> bool {
-    if !(s.member_count.wrapping_sub(s.rejection_count) < s.threshold) {
+    if !((s.member_count.wrapping_sub(s.rejection_count) < s.threshold)) {
         return false;
     }
     if s.status != Status::HasProposal {
@@ -163,7 +167,7 @@ fn cancel_proposal(s: &mut State) -> bool {
 }
 
 fn add_member(s: &mut State, member_index: u8, member_pubkey: Address) -> bool {
-    if !(member_index < s.member_count) {
+    if !((member_index < s.member_count)) {
         return false;
     }
     if s.status != Status::Active {
@@ -175,7 +179,7 @@ fn add_member(s: &mut State, member_index: u8, member_pubkey: Address) -> bool {
 }
 
 fn remove_member(s: &mut State) -> bool {
-    if !(s.member_count > s.threshold && (s.approval_count == 0) && (s.rejection_count == 0)) {
+    if !((s.member_count > s.threshold) && ((s.approval_count == 0) && (s.rejection_count == 0))) {
         return false;
     }
     if s.status != Status::Active {
@@ -384,7 +388,7 @@ proptest! {
     #[test]
     fn create_vault_rejects_invalid(s in arb_boundary_state(), threshold in prop_oneof![0u8..=3u8, 252u8..=255u8], member_count in prop_oneof![0u8..=3u8, 252u8..=255u8]) {
         let mut s = s;
-        prop_assume!(!((threshold > 0) && (threshold <= member_count) && member_count <= 32));
+        prop_assume!(!(((threshold > 0) && (threshold <= member_count)) && (member_count <= 32)));
         prop_assert!(!create_vault(&mut s, threshold, member_count),
             "create_vault must reject when guard is violated");
     }
@@ -395,7 +399,7 @@ proptest! {
     #[test]
     fn approve_rejects_invalid(s in arb_boundary_state(), member_index in prop_oneof![0u8..=3u8, 252u8..=255u8]) {
         let mut s = s;
-        prop_assume!(!(member_index < s.member_count && s.members[(member_index) as usize] == approver && s.voted[(member_index) as usize] == 0));
+        prop_assume!(!((member_index < s.member_count) && (s.members[(member_index) as usize] == approver) && (s.voted[(member_index) as usize] == 0)));
         prop_assert!(!approve(&mut s, member_index),
             "approve must reject when guard is violated");
     }
@@ -406,7 +410,7 @@ proptest! {
     #[test]
     fn reject_rejects_invalid(s in arb_boundary_state(), member_index in prop_oneof![0u8..=3u8, 252u8..=255u8]) {
         let mut s = s;
-        prop_assume!(!(member_index < s.member_count && s.members[(member_index) as usize] == rejecter && s.voted[(member_index) as usize] == 0));
+        prop_assume!(!((member_index < s.member_count) && (s.members[(member_index) as usize] == rejecter) && (s.voted[(member_index) as usize] == 0)));
         prop_assert!(!reject(&mut s, member_index),
             "reject must reject when guard is violated");
     }
@@ -417,7 +421,7 @@ proptest! {
     #[test]
     fn execute_rejects_invalid(s in arb_boundary_state(), member_index in prop_oneof![0u8..=3u8, 252u8..=255u8]) {
         let mut s = s;
-        prop_assume!(!(member_index < s.member_count && s.members[(member_index) as usize] == executor && s.approval_count >= s.threshold));
+        prop_assume!(!((member_index < s.member_count) && (s.members[(member_index) as usize] == executor) && (s.approval_count >= s.threshold)));
         prop_assert!(!execute(&mut s, member_index),
             "execute must reject when guard is violated");
     }
@@ -428,7 +432,7 @@ proptest! {
     #[test]
     fn cancel_proposal_rejects_invalid(s in arb_boundary_state()) {
         let mut s = s;
-        prop_assume!(!(s.member_count.wrapping_sub(s.rejection_count) < s.threshold));
+        prop_assume!(!((s.member_count.wrapping_sub(s.rejection_count) < s.threshold)));
         prop_assert!(!cancel_proposal(&mut s),
             "cancel_proposal must reject when guard is violated");
     }
@@ -439,7 +443,7 @@ proptest! {
     #[test]
     fn add_member_rejects_invalid(s in arb_boundary_state(), member_index in prop_oneof![0u8..=3u8, 252u8..=255u8], member_pubkey in prop::array::uniform32(0u8..1u8)) {
         let mut s = s;
-        prop_assume!(!(member_index < s.member_count));
+        prop_assume!(!((member_index < s.member_count)));
         prop_assert!(!add_member(&mut s, member_index, member_pubkey),
             "add_member must reject when guard is violated");
     }
@@ -450,7 +454,7 @@ proptest! {
     #[test]
     fn remove_member_rejects_invalid(s in arb_boundary_state()) {
         let mut s = s;
-        prop_assume!(!(s.member_count > s.threshold && (s.approval_count == 0) && (s.rejection_count == 0)));
+        prop_assume!(!((s.member_count > s.threshold) && ((s.approval_count == 0) && (s.rejection_count == 0))));
         prop_assert!(!remove_member(&mut s),
             "remove_member must reject when guard is violated");
     }

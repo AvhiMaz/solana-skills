@@ -32,33 +32,37 @@ struct State {
 }
 
 /// Proptest strategy for generating arbitrary State values.
-fn arb_state() -> impl Strategy<Value = State> {
-    (
-        0u64..=u64::MAX,
-        0u64..=u64::MAX,
-        0u64..=u64::MAX,
-        prop_oneof![Just(Status::Uninitialized), Just(Status::Active), Just(Status::Paused)],
-    ).prop_map(|(total_deposits, total_borrows, interest_rate, status)| State {
-        total_deposits,
-        total_borrows,
-        interest_rate,
-        status,
-    })
+prop_compose! {
+    fn arb_state()(
+        total_deposits in 0u64..=u64::MAX,
+        total_borrows in 0u64..=u64::MAX,
+        interest_rate in 0u64..=u64::MAX,
+        status in prop_oneof![Just(Status::Uninitialized), Just(Status::Active), Just(Status::Paused)],
+    ) -> State {
+        State {
+            total_deposits,
+            total_borrows,
+            interest_rate,
+            status,
+        }
+    }
 }
 
 /// Boundary-biased strategy for guard rejection tests.
-fn arb_boundary_state() -> impl Strategy<Value = State> {
-    (
-        prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX],
-        prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX],
-        prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX],
-        prop_oneof![Just(Status::Uninitialized), Just(Status::Active), Just(Status::Paused)],
-    ).prop_map(|(total_deposits, total_borrows, interest_rate, status)| State {
-        total_deposits,
-        total_borrows,
-        interest_rate,
-        status,
-    })
+prop_compose! {
+    fn arb_boundary_state()(
+        total_deposits in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX],
+        total_borrows in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX],
+        interest_rate in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX],
+        status in prop_oneof![Just(Status::Uninitialized), Just(Status::Active), Just(Status::Paused)],
+    ) -> State {
+        State {
+            total_deposits,
+            total_borrows,
+            interest_rate,
+            status,
+        }
+    }
 }
 
 /// pool_solvency: s.total_deposits ≥ s.total_borrows
@@ -67,7 +71,7 @@ fn pool_solvency(s: &State) -> bool {
 }
 
 fn init_pool(s: &mut State, rate: u64) -> bool {
-    if !(rate > 0) {
+    if !((rate > 0)) {
         return false;
     }
     if s.status != Status::Uninitialized {
@@ -81,7 +85,7 @@ fn init_pool(s: &mut State, rate: u64) -> bool {
 }
 
 fn deposit(s: &mut State, amount: u64) -> bool {
-    if !(amount > 0) {
+    if !((amount > 0)) {
         return false;
     }
     if s.status != Status::Active {
@@ -126,7 +130,7 @@ proptest! {
     #[test]
     fn init_pool_rejects_invalid(s in arb_boundary_state(), rate in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX]) {
         let mut s = s;
-        prop_assume!(!(rate > 0));
+        prop_assume!(!((rate > 0)));
         prop_assert!(!init_pool(&mut s, rate),
             "init_pool must reject when guard is violated");
     }
@@ -137,7 +141,7 @@ proptest! {
     #[test]
     fn deposit_rejects_invalid(s in arb_boundary_state(), amount in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX]) {
         let mut s = s;
-        prop_assume!(!(amount > 0));
+        prop_assume!(!((amount > 0)));
         prop_assert!(!deposit(&mut s, amount),
             "deposit must reject when guard is violated");
     }
@@ -248,33 +252,37 @@ struct State {
 }
 
 /// Proptest strategy for generating arbitrary State values.
-fn arb_state() -> impl Strategy<Value = State> {
-    (
-        0u64..=u64::MAX,
-        0u64..=u64::MAX,
-        prop_oneof![Just(Status::Uninitialized), Just(Status::Active), Just(Status::Paused)],
-    ).prop_map(|(amount, collateral, status)| State {
-        amount,
-        collateral,
-        status,
-    })
+prop_compose! {
+    fn arb_state()(
+        amount in 0u64..=u64::MAX,
+        collateral in 0u64..=u64::MAX,
+        status in prop_oneof![Just(Status::Uninitialized), Just(Status::Active), Just(Status::Paused)],
+    ) -> State {
+        State {
+            amount,
+            collateral,
+            status,
+        }
+    }
 }
 
 /// Boundary-biased strategy for guard rejection tests.
-fn arb_boundary_state() -> impl Strategy<Value = State> {
-    (
-        prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX],
-        prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX],
-        prop_oneof![Just(Status::Uninitialized), Just(Status::Active), Just(Status::Paused)],
-    ).prop_map(|(amount, collateral, status)| State {
-        amount,
-        collateral,
-        status,
-    })
+prop_compose! {
+    fn arb_boundary_state()(
+        amount in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX],
+        collateral in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX],
+        status in prop_oneof![Just(Status::Uninitialized), Just(Status::Active), Just(Status::Paused)],
+    ) -> State {
+        State {
+            amount,
+            collateral,
+            status,
+        }
+    }
 }
 
 fn borrow(s: &mut State, amount: u64, collateral: u64) -> bool {
-    if !((amount > 0) && (collateral > 0)) {
+    if !(((amount > 0) && (collateral > 0))) {
         return false;
     }
     if s.status != Status::Empty {
@@ -297,7 +305,7 @@ fn repay(s: &mut State) -> bool {
 }
 
 fn liquidate(s: &mut State) -> bool {
-    if !(s.amount > s.collateral) {
+    if !((s.amount > s.collateral)) {
         return false;
     }
     if s.status != Status::Active {
@@ -313,7 +321,7 @@ proptest! {
     #[test]
     fn borrow_rejects_invalid(s in arb_boundary_state(), amount in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX], collateral in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX]) {
         let mut s = s;
-        prop_assume!(!((amount > 0) && (collateral > 0)));
+        prop_assume!(!(((amount > 0) && (collateral > 0))));
         prop_assert!(!borrow(&mut s, amount, collateral),
             "borrow must reject when guard is violated");
     }
@@ -324,7 +332,7 @@ proptest! {
     #[test]
     fn liquidate_rejects_invalid(s in arb_boundary_state()) {
         let mut s = s;
-        prop_assume!(!(s.amount > s.collateral));
+        prop_assume!(!((s.amount > s.collateral)));
         prop_assert!(!liquidate(&mut s),
             "liquidate must reject when guard is violated");
     }

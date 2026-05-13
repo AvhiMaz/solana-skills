@@ -60,7 +60,7 @@ fn votes_bounded(s: &State) -> bool {
 // ============================================================================
 
 fn create_vault(s: &mut State, threshold: u8, member_count: u8) -> bool {
-    if !((threshold > 0) && (threshold <= member_count) && member_count <= 32) {
+    if !(((threshold > 0) && (threshold <= member_count)) && (member_count <= 32)) {
         return false;
     }
     if s.status != Status::Uninitialized {
@@ -85,7 +85,7 @@ fn propose(s: &mut State) -> bool {
 }
 
 fn approve(s: &mut State, member_index: u8) -> bool {
-    if !(member_index < s.member_count && s.members[(member_index) as usize] == approver && s.voted[(member_index) as usize] == 0) {
+    if !((member_index < s.member_count) && (s.members[(member_index) as usize] == approver) && (s.voted[(member_index) as usize] == 0)) {
         return false;
     }
     if s.status != Status::HasProposal {
@@ -101,7 +101,7 @@ fn approve(s: &mut State, member_index: u8) -> bool {
 }
 
 fn reject(s: &mut State, member_index: u8) -> bool {
-    if !(member_index < s.member_count && s.members[(member_index) as usize] == rejecter && s.voted[(member_index) as usize] == 0) {
+    if !((member_index < s.member_count) && (s.members[(member_index) as usize] == rejecter) && (s.voted[(member_index) as usize] == 0)) {
         return false;
     }
     if s.status != Status::HasProposal {
@@ -117,7 +117,7 @@ fn reject(s: &mut State, member_index: u8) -> bool {
 }
 
 fn execute(s: &mut State, member_index: u8) -> bool {
-    if !(member_index < s.member_count && s.members[(member_index) as usize] == executor && s.approval_count >= s.threshold) {
+    if !((member_index < s.member_count) && (s.members[(member_index) as usize] == executor) && (s.approval_count >= s.threshold)) {
         return false;
     }
     if s.status != Status::HasProposal {
@@ -130,7 +130,7 @@ fn execute(s: &mut State, member_index: u8) -> bool {
 }
 
 fn cancel_proposal(s: &mut State) -> bool {
-    if !(s.member_count - s.rejection_count < s.threshold) {
+    if !((s.member_count - s.rejection_count < s.threshold)) {
         return false;
     }
     if s.status != Status::HasProposal {
@@ -143,7 +143,7 @@ fn cancel_proposal(s: &mut State) -> bool {
 }
 
 fn add_member(s: &mut State, member_index: u8, member_pubkey: Address) -> bool {
-    if !(member_index < s.member_count) {
+    if !((member_index < s.member_count)) {
         return false;
     }
     if s.status != Status::Active {
@@ -155,7 +155,7 @@ fn add_member(s: &mut State, member_index: u8, member_pubkey: Address) -> bool {
 }
 
 fn remove_member(s: &mut State) -> bool {
-    if !(s.member_count > s.threshold && (s.approval_count == 0) && (s.rejection_count == 0)) {
+    if !((s.member_count > s.threshold) && ((s.approval_count == 0) && (s.rejection_count == 0))) {
         return false;
     }
     if s.status != Status::Active {
@@ -189,7 +189,7 @@ fn verify_create_vault_rejects_invalid() {
     kani::assume(s.status == Status::Uninitialized);
     let threshold: u8 = kani::any();
     let member_count: u8 = kani::any();
-    kani::assume(!((threshold > 0) && (threshold <= member_count) && member_count <= 32));
+    kani::assume(!(((threshold > 0) && (threshold <= member_count)) && (member_count <= 32)));
     assert!(!create_vault(&mut s, threshold, member_count),
         "create_vault must reject when guard is violated");
 }
@@ -209,7 +209,7 @@ fn verify_approve_rejects_invalid() {
     };
     kani::assume(s.status == Status::HasProposal);
     let member_index: u8 = kani::any();
-    kani::assume(!(member_index < s.member_count && s.members[(member_index) as usize] == approver && s.voted[(member_index) as usize] == 0));
+    kani::assume(!((member_index < s.member_count) && (s.members[(member_index) as usize] == approver) && (s.voted[(member_index) as usize] == 0)));
     assert!(!approve(&mut s, member_index),
         "approve must reject when guard is violated");
 }
@@ -229,7 +229,7 @@ fn verify_reject_rejects_invalid() {
     };
     kani::assume(s.status == Status::HasProposal);
     let member_index: u8 = kani::any();
-    kani::assume(!(member_index < s.member_count && s.members[(member_index) as usize] == rejecter && s.voted[(member_index) as usize] == 0));
+    kani::assume(!((member_index < s.member_count) && (s.members[(member_index) as usize] == rejecter) && (s.voted[(member_index) as usize] == 0)));
     assert!(!reject(&mut s, member_index),
         "reject must reject when guard is violated");
 }
@@ -249,7 +249,7 @@ fn verify_execute_rejects_invalid() {
     };
     kani::assume(s.status == Status::HasProposal);
     let member_index: u8 = kani::any();
-    kani::assume(!(member_index < s.member_count && s.members[(member_index) as usize] == executor && s.approval_count >= s.threshold));
+    kani::assume(!((member_index < s.member_count) && (s.members[(member_index) as usize] == executor) && (s.approval_count >= s.threshold)));
     assert!(!execute(&mut s, member_index),
         "execute must reject when guard is violated");
 }
@@ -268,7 +268,7 @@ fn verify_cancel_proposal_rejects_invalid() {
         status: kani::any(),
     };
     kani::assume(s.status == Status::HasProposal);
-    kani::assume(!(s.member_count - s.rejection_count < s.threshold));
+    kani::assume(!((s.member_count - s.rejection_count < s.threshold)));
     assert!(!cancel_proposal(&mut s),
         "cancel_proposal must reject when guard is violated");
 }
@@ -289,7 +289,7 @@ fn verify_add_member_rejects_invalid() {
     kani::assume(s.status == Status::Active);
     let member_index: u8 = kani::any();
     let member_pubkey: Address = kani::any();
-    kani::assume(!(member_index < s.member_count));
+    kani::assume(!((member_index < s.member_count)));
     assert!(!add_member(&mut s, member_index, member_pubkey),
         "add_member must reject when guard is violated");
 }
@@ -308,7 +308,7 @@ fn verify_remove_member_rejects_invalid() {
         status: kani::any(),
     };
     kani::assume(s.status == Status::Active);
-    kani::assume(!(s.member_count > s.threshold && (s.approval_count == 0) && (s.rejection_count == 0)));
+    kani::assume(!((s.member_count > s.threshold) && ((s.approval_count == 0) && (s.rejection_count == 0))));
     assert!(!remove_member(&mut s),
         "remove_member must reject when guard is violated");
 }

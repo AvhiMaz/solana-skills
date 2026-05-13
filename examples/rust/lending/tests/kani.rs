@@ -50,7 +50,7 @@ fn pool_solvency(s: &State) -> bool {
 // ============================================================================
 
 fn init_pool(s: &mut State, rate: u64) -> bool {
-    if !(rate > 0) {
+    if !((rate > 0)) {
         return false;
     }
     if s.status != Status::Uninitialized {
@@ -64,7 +64,7 @@ fn init_pool(s: &mut State, rate: u64) -> bool {
 }
 
 fn deposit(s: &mut State, amount: u64) -> bool {
-    if !(amount > 0) {
+    if !((amount > 0)) {
         return false;
     }
     if s.status != Status::Active {
@@ -79,7 +79,7 @@ fn deposit(s: &mut State, amount: u64) -> bool {
 }
 
 fn borrow(s: &mut State, amount: u64, collateral: u64) -> bool {
-    if !((amount > 0) && (collateral > 0)) {
+    if !(((amount > 0) && (collateral > 0))) {
         return false;
     }
     if s.status != Status::Empty {
@@ -102,7 +102,7 @@ fn repay(s: &mut State) -> bool {
 }
 
 fn liquidate(s: &mut State) -> bool {
-    if !(s.amount > s.collateral) {
+    if !((s.amount > s.collateral)) {
         return false;
     }
     if s.status != Status::Active {
@@ -129,7 +129,7 @@ fn verify_init_pool_rejects_invalid() {
     };
     kani::assume(s.status == Status::Uninitialized);
     let rate: u64 = kani::any();
-    kani::assume(!(rate > 0));
+    kani::assume(!((rate > 0)));
     assert!(!init_pool(&mut s, rate),
         "init_pool must reject when guard is violated");
 }
@@ -146,7 +146,7 @@ fn verify_deposit_rejects_invalid() {
     };
     kani::assume(s.status == Status::Active);
     let amount: u64 = kani::any();
-    kani::assume(!(amount > 0));
+    kani::assume(!((amount > 0)));
     assert!(!deposit(&mut s, amount),
         "deposit must reject when guard is violated");
 }
@@ -164,7 +164,7 @@ fn verify_borrow_rejects_invalid() {
     kani::assume(s.status == Status::Empty);
     let amount: u64 = kani::any();
     let collateral: u64 = kani::any();
-    kani::assume(!((amount > 0) && (collateral > 0)));
+    kani::assume(!(((amount > 0) && (collateral > 0))));
     assert!(!borrow(&mut s, amount, collateral),
         "borrow must reject when guard is violated");
 }
@@ -180,7 +180,7 @@ fn verify_liquidate_rejects_invalid() {
         status: kani::any(),
     };
     kani::assume(s.status == Status::Active);
-    kani::assume(!(s.amount > s.collateral));
+    kani::assume(!((s.amount > s.collateral)));
     assert!(!liquidate(&mut s),
         "liquidate must reject when guard is violated");
 }

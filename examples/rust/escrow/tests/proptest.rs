@@ -28,33 +28,37 @@ struct State {
 }
 
 /// Proptest strategy for generating arbitrary State values.
-fn arb_state() -> impl Strategy<Value = State> {
-    (
-        0u64..=u64::MAX,
-        0u64..=u64::MAX,
-        prop_oneof![Just(Status::Uninitialized), Just(Status::Open), Just(Status::Closed)],
-    ).prop_map(|(initializer_amount, taker_amount, status)| State {
-        initializer_amount,
-        taker_amount,
-        status,
-    })
+prop_compose! {
+    fn arb_state()(
+        initializer_amount in 0u64..=u64::MAX,
+        taker_amount in 0u64..=u64::MAX,
+        status in prop_oneof![Just(Status::Uninitialized), Just(Status::Open), Just(Status::Closed)],
+    ) -> State {
+        State {
+            initializer_amount,
+            taker_amount,
+            status,
+        }
+    }
 }
 
 /// Boundary-biased strategy for guard rejection tests.
-fn arb_boundary_state() -> impl Strategy<Value = State> {
-    (
-        prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX],
-        prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX],
-        prop_oneof![Just(Status::Uninitialized), Just(Status::Open), Just(Status::Closed)],
-    ).prop_map(|(initializer_amount, taker_amount, status)| State {
-        initializer_amount,
-        taker_amount,
-        status,
-    })
+prop_compose! {
+    fn arb_boundary_state()(
+        initializer_amount in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX],
+        taker_amount in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX],
+        status in prop_oneof![Just(Status::Uninitialized), Just(Status::Open), Just(Status::Closed)],
+    ) -> State {
+        State {
+            initializer_amount,
+            taker_amount,
+            status,
+        }
+    }
 }
 
 fn initialize(s: &mut State, deposit_amount: u64, receive_amount: u64) -> bool {
-    if !((deposit_amount > 0) && (receive_amount > 0)) {
+    if !(((deposit_amount > 0) && (receive_amount > 0))) {
         return false;
     }
     if s.status != Status::Uninitialized {
@@ -87,7 +91,7 @@ proptest! {
     #[test]
     fn initialize_rejects_invalid(s in arb_boundary_state(), deposit_amount in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX], receive_amount in prop_oneof![0u64..=3u64, (u64::MAX - 3)..=u64::MAX]) {
         let mut s = s;
-        prop_assume!(!((deposit_amount > 0) && (receive_amount > 0)));
+        prop_assume!(!(((deposit_amount > 0) && (receive_amount > 0))));
         prop_assert!(!initialize(&mut s, deposit_amount, receive_amount),
             "initialize must reject when guard is violated");
     }
