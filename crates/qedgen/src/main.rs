@@ -726,20 +726,24 @@ enum Commands {
         #[arg(long)]
         all: bool,
 
-        /// After scaffolding, emit one stdout prompt block per handler
-        /// whose generated body still contains a `todo!()`. The in-session
-        /// agent (Claude / Codex) reads the prompts and edits the files.
+        /// DEPRECATED (slated for v3.0 removal): emit one stdout prompt
+        /// block per handler whose body still contains a `todo!()`. The
+        /// agent can already do this directly — grep for `todo!()` in
+        /// programs/, read the spec's handler block, edit each body in
+        /// place. The prompt-emission layer is redundant with the
+        /// agent's own file tools. Flag remains functional in v2.x to
+        /// avoid breaking existing scripts.
         #[arg(long)]
         fill: bool,
 
-        /// Restrict --fill to one handler by name (default: all that need filling)
+        /// Restrict --fill to one handler by name (deprecated with --fill).
         #[arg(long)]
         handler: Option<String>,
 
-        /// After scaffolding, emit prompt blocks for every `todo!()` site in
-        /// the generated integration test file. Same stdout-for-agent flow
-        /// as --fill, but for `tests/integration_tests.rs` rather than
-        /// per-handler files.
+        /// DEPRECATED (slated for v3.0 removal): emit prompt blocks for
+        /// every `todo!()` site in the generated integration test file.
+        /// Same direct-edit guidance applies — the agent reads the spec
+        /// and the test file, edits in place.
         #[arg(long)]
         fill_tests: bool,
     },
@@ -2122,6 +2126,13 @@ async fn main() -> Result<()> {
             }
 
             if fill {
+                eprintln!("warning: `qedgen codegen --fill` is deprecated.");
+                eprintln!("         The agent can fill `todo!()` sites directly via Read / Edit.");
+                eprintln!("         Pattern: grep for `todo!()` in programs/, read the spec's");
+                eprintln!("         handler/accounts blocks, edit each body in place. The");
+                eprintln!("         prompt-emission layer is redundant with the agent's own");
+                eprintln!("         file tools. Slated for hard-removal in v3.0; flag remains");
+                eprintln!("         functional for now to avoid breaking existing scripts.");
                 let parsed = check::parse_spec_file(&spec)?;
                 let opts = fill::FillOpts {
                     spec: &parsed,
@@ -2133,6 +2144,9 @@ async fn main() -> Result<()> {
             }
 
             if fill_tests {
+                eprintln!("warning: `qedgen codegen --fill-tests` is deprecated.");
+                eprintln!("         The agent can fill integration-test `todo!()` sites directly.");
+                eprintln!("         Slated for hard-removal in v3.0; flag remains functional.");
                 let parsed = check::parse_spec_file(&spec)?;
                 let opts = fill::FillTestsOpts {
                     spec: &parsed,

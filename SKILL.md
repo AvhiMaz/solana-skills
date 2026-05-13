@@ -86,6 +86,8 @@ cargo check --manifest-path programs/Cargo.toml
 cargo test --manifest-path programs/Cargo.toml
 ```
 
+**No `--fill` flag.** The agent reads the generated files, greps for `todo!()`, looks up the matching handler / accounts / effect in the `.qedspec`, and edits each body in place. The old `qedgen codegen --fill` / `--fill-tests` flags emitted structured prompts to stdout for the agent to consume — useful before agents had file tools, ceremony now. They're soft-deprecated in v2.18 (print a warning, still run) and will be removed in v3.0. Same direct-edit pattern applies to integration tests and Crucible action bodies.
+
 Step 5. Verify generated backends.
 
 ```bash

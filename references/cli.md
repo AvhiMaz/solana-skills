@@ -418,9 +418,9 @@ $QEDGEN codegen --ci
 | `--ci-output` | Path | `.github/workflows/verify.yml` | CI workflow output path |
 | `--ci-asm` | String | - | sBPF assembly source (for CI verify step) |
 | `--ci-ratchet` | Path | - | Anchor IDL the generated CI should lint with `qedgen readiness`. When set, the emitted `verify.yml` runs ratchet after the verification jobs — any breaking / unsafe finding fails the build. Path is repo-root-relative (e.g. `target/idl/escrow.json`) |
-| `--fill` | bool | false | After scaffolding, emit one stdout prompt block per handler whose generated body still contains a `todo!()`. The in-session agent (Claude / Codex) reads the prompts and edits the files. |
-| `--handler` | String | - | Restrict `--fill` to one handler by name (default: every handler that needs filling) |
-| `--fill-tests` | bool | false | After scaffolding, emit prompt blocks for every `todo!()` site in the generated integration test file. Same stdout-for-agent flow as `--fill`, but for `tests/integration_tests.rs`. |
+| `--fill` | bool | false | **DEPRECATED (v3.0 removal).** Emits stdout prompt blocks per handler with `todo!()`. The agent can fill these directly via Read / Edit — grep for `todo!()` in `programs/`, look up the handler in the spec, edit in place. Flag still runs in v2.x but prints a deprecation warning. |
+| `--handler` | String | - | Restrict `--fill` to one handler by name (deprecated with `--fill`). |
+| `--fill-tests` | bool | false | **DEPRECATED (v3.0 removal).** Same shape as `--fill` for `tests/integration_tests.rs`. Agent fills directly. |
 
 #### Scaffold-once vs. always-regenerate
 
