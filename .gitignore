@@ -61,6 +61,10 @@ bin/
 docs/prds/*
 !docs/prds/RELEASE-*.md
 
+# Research notes / prior-art comparisons stay local; the source material
+# names external projects we don't cite in public artifacts.
+docs/research/
+
 # Internal learnings / reconnaissance — source material for probes and
 # lints, never committed to the public repo (see feedback memory: no
 # naming sources of finding in public artifacts).

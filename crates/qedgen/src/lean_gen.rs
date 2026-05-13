@@ -5496,6 +5496,7 @@ handler noop : State -> State {
             transfers: vec![],
             emits: vec![],
             invariants: vec![],
+            establishes: vec![],
             properties: vec![],
             calls: vec![],
         };

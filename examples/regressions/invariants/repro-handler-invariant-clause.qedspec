@@ -1,0 +1,50 @@
+// Repro: handler-side `invariant Foo` clause links a handler to a named
+// top-level invariant. The grammar at chumsky_parser.rs:1223 parses
+// `invariant Name` as a handler clause and the adapter wires it into
+// ParsedHandler.invariants. check.rs:1406-1414 then emits a per-handler
+// proof obligation `{handler}.preserves_{inv_name}`.
+//
+// As of 2026-05-13 no example spec actually exercises this path — codegen
+// works in Lean (ParsedInvariant.lean_expr is populated and theorems emit)
+// but the Rust-side rust_expr field is documented as "v2.15 wires this into
+// Kani / proptest invariant-checking harnesses" and isn't actually consumed
+// end-to-end. This fixture pins the existing Lean path and serves as the
+// driver for the Rust-side wire-up.
+//
+// Expected behavior (pre-fix):
+//   `qedgen check` parses and reports without an unknown-invariant error.
+//   `qedgen codegen --lean` emits a `count_bounded_preserves_increment` theorem.
+//   `qedgen codegen --proptest` does NOT emit an invariant preservation test
+//     (the rust_expr path is missing — that's what task 21/22 fixes).
+//   `qedgen codegen --kani` same: no per-(handler, invariant) BMC harness.
+//
+// After the wire-up:
+//   Proptest harness contains a test that asserts the invariant pre/post.
+//   Kani harness contains a verify_increment_preserves_count_bounded proof.
+
+spec ReproHandlerInvariantClause
+program_id "11111111111111111111111111111111"
+
+const MAX_COUNT = 100
+
+type State
+  | Active of { count : U64 }
+
+type Error
+  | E
+
+invariant count_bounded :
+  state.count <= MAX_COUNT
+
+handler increment : State.Active -> State.Active {
+  permissionless
+  invariant count_bounded
+  requires state.count < MAX_COUNT
+  effect { count := count + 1 }
+}
+
+handler reset : State.Active -> State.Active {
+  permissionless
+  invariant count_bounded
+  effect { count := 0 }
+}

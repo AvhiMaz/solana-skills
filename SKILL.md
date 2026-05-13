@@ -94,6 +94,20 @@ $QEDGEN verify --spec program.qedspec --kani
 $QEDGEN verify --spec program.qedspec --lean
 ```
 
+Failing harnesses surface with spec-named values (the binder name from the spec, not `var_3`):
+
+```
+[FAIL] kani       (4567 ms)
+       counterexample: probe_overflow_transfer
+         assertion failed: post == pre.checked_add(amount).unwrap_or(0)
+         at tests/kani.rs:42:5
+           pre    = 18446744073709551615ul
+           amount = 1ul
+           post   = 0ul
+```
+
+Use the named values to propose the next spec edit (tightening a `requires`, adding an `aborts_if`, marking an effect `+=!`/`+=?`), then re-run `qedgen verify`.
+
 Run only the backends relevant to artifacts present in the project. For generated examples in this repo, also run:
 
 ```bash
@@ -190,6 +204,33 @@ Use Lean for:
 Use Leanstral for routine sorry filling and Aristotle for harder long-running proof search. Read `references/proof-patterns.md` before proof repair and `references/sbpf.md` for sBPF.
 
 Always run `lake build` after editing Lean and run `qedgen check` after proofs compile so orphan or missing obligations are reported.
+
+## Invariants vs Properties
+
+Two related but distinct constructs in `.qedspec`:
+
+- **`property` / `preserved_by`** — a predicate over `state` that some named set of handlers must preserve. Use when the predicate is the headline correctness claim for those handlers (`pool_solvency preserved_by all`, `votes_bounded preserved_by [create_vault, propose, ...]`). Generates per-handler proptest/Kani harnesses and Lean preservation theorems.
+- **`invariant` + handler-side `invariant Name` / `establishes Name`** — a named predicate referenced from inside handler blocks. Use when the same predicate is asserted by multiple handlers and the handler-side claim is what you want the spec to highlight. The handler clause is the join: `invariant Foo` means *preserves* (assume Foo pre-state, assert post), `establishes Foo` means *establishes* (no pre-assume, assert post only — useful for init / one-shot transitions).
+
+```fsharp
+invariant root_set :
+  state.root != ZERO_ROOT
+
+handler init : State.Active -> State.Active {
+  establishes root_set
+  effect { root := <derived_pda> }
+}
+
+handler update : State.Active -> State.Active {
+  invariant root_set       // preserves: assumes root_set pre, asserts post
+  requires state.root != ZERO_ROOT
+  effect { root := <new_root> }
+}
+```
+
+Both forms generate Rust-side BMC + proptest harnesses when the body has a `rust_expr` and at least one handler links to it. Description-only invariants (`invariant name "..."`) are documentation only — no Rust harness emits.
+
+Pick `property` when the handler list is short and the property name reads naturally as the claim ("conservation"). Pick `invariant` when the predicate is reused as a *thing* across many handlers, especially when some establish it and others preserve it.
 
 ## References
 

@@ -458,6 +458,13 @@ pub struct ParsedHandler {
     pub emits: Vec<String>,
     /// Per-handler invariant references (names of invariants this handler must preserve).
     pub invariants: Vec<String>,
+    /// Per-handler invariants this handler ESTABLISHES at post-state without
+    /// requiring them as a precondition (v2.17 follow-up). Useful
+    /// for init / one-shot handlers that bring the system into a state where
+    /// the named invariant becomes true for the first time. Codegen treats
+    /// these like `invariants` for the post-assertion but skips the
+    /// `kani::assume` / `prop_assume!` pre-state guard.
+    pub establishes: Vec<String>,
     /// Per-handler properties (from inline property/invariant clauses).
     pub properties: Vec<String>,
     /// `call Interface.handler(name = expr, ...)` sites — CPI invocations
@@ -4637,6 +4644,7 @@ mod tests {
             transfers: vec![],
             emits: vec![],
             invariants: vec![],
+            establishes: vec![],
             properties: vec![],
             calls: vec![],
         }

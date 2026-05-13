@@ -1251,6 +1251,7 @@ mod tests {
             transfers: vec![],
             emits: vec![],
             invariants: vec![],
+            establishes: vec![],
             properties: vec![],
             calls: vec![],
         }

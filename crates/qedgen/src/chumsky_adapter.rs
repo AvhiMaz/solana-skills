@@ -2478,6 +2478,7 @@ fn adapt_handler(h: &a::HandlerDecl, consts: ConstTable, env: &TypeEnv) -> Parse
         transfers: Vec::new(),
         emits: Vec::new(),
         invariants: Vec::new(),
+        establishes: Vec::new(),
         properties: Vec::new(),
         calls: Vec::new(),
     };
@@ -2586,6 +2587,7 @@ fn adapt_handler(h: &a::HandlerDecl, consts: ConstTable, env: &TypeEnv) -> Parse
             a::HandlerClause::AbortsTotal => handler.aborts_total = true,
             a::HandlerClause::Permissionless => handler.permissionless = true,
             a::HandlerClause::Invariant(name) => handler.invariants.push(name.clone()),
+            a::HandlerClause::Establishes(name) => handler.establishes.push(name.clone()),
             a::HandlerClause::Include(_) => {
                 // Schema includes: forward-compat; ignored in phase 1.
             }
@@ -2751,6 +2753,68 @@ mod tests {
 
     const PERCOLATOR_SPEC: &str =
         include_str!("../../../examples/rust/percolator/percolator.qedspec");
+
+    /// v2.17: both `invariant Foo` and `establishes Foo` handler clauses parse
+    /// and route to the right `ParsedHandler` field.
+    /// Backends key off this split: invariants → preserves semantics (assume
+    /// pre-state), establishes → establishes semantics (no pre-assume).
+    #[test]
+    fn handler_invariant_clauses_route_to_invariants_vs_establishes() {
+        let src = include_str!(
+            "../../../examples/regressions/invariants/repro-establishes-clause.qedspec"
+        );
+        let spec = parse_str(src).expect("parse");
+        let init = spec
+            .handlers
+            .iter()
+            .find(|h| h.name == "init")
+            .expect("init handler");
+        let update = spec
+            .handlers
+            .iter()
+            .find(|h| h.name == "update")
+            .expect("update handler");
+        assert_eq!(init.establishes, vec!["root_set".to_string()]);
+        assert!(init.invariants.is_empty(), "init only `establishes`");
+        assert_eq!(update.invariants, vec!["root_set".to_string()]);
+        assert!(
+            update.establishes.is_empty(),
+            "update only `invariant` (preserves)"
+        );
+    }
+
+    #[test]
+    fn handler_invariant_clause_routes_to_invariants() {
+        let src = include_str!(
+            "../../../examples/regressions/invariants/repro-handler-invariant-clause.qedspec"
+        );
+        let spec = parse_str(src).expect("parse");
+        for h in &spec.handlers {
+            assert_eq!(
+                h.invariants,
+                vec!["count_bounded".to_string()],
+                "handler {} should list count_bounded as `invariant`",
+                h.name
+            );
+            assert!(h.establishes.is_empty());
+        }
+        // The top-level invariant decl carries the predicate body that the
+        // adapter lowers via translate_property_to_rust. v2.17 wire-up
+        // confirms rust_expr is populated (it was always populated; only
+        // backend consumption was missing).
+        let inv = spec
+            .invariants
+            .iter()
+            .find(|i| i.name == "count_bounded")
+            .expect("count_bounded invariant decl");
+        assert!(inv.lean_expr.is_some(), "lean_expr populated");
+        assert!(inv.rust_expr.is_some(), "rust_expr populated");
+        let rust = inv.rust_expr.as_deref().unwrap();
+        assert!(
+            rust.contains("s.count"),
+            "rust_expr should reference s.count, got: {rust}"
+        );
+    }
 
     // Issue #8 finding #7 regression. Pubkey := <int> must be
     // rejected at check time, not deferred to lake build's

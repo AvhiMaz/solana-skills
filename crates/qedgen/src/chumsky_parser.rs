@@ -116,6 +116,9 @@ const KEYWORDS: &[&str] = &[
     "in",
     // v2.7 G4: handler-level opt-out of the no_access_control lint.
     "permissionless",
+    // v2.17 follow-up: handler-side clause asserting the named invariant
+    // holds at POST-state without assuming it pre-state.
+    "establishes",
     // v2.8 G1: top-level `import Name from "key"`. The trailing `from` is
     // contextual (matched via `kw("from")` only inside `import_decl`), not a
     // global keyword — handlers still use `from = expr` in call args.
@@ -1224,6 +1227,10 @@ fn handler_clause<'a>() -> impl Parser<'a, &'a str, HandlerClause, Err<'a>> + Cl
         .then_ignore(wsc())
         .ignore_then(non_keyword_ident())
         .map(HandlerClause::Invariant);
+    let establishes = just("establishes")
+        .then_ignore(wsc())
+        .ignore_then(non_keyword_ident())
+        .map(HandlerClause::Establishes);
     let include = just("include")
         .then_ignore(wsc())
         .ignore_then(non_keyword_ident())
@@ -1257,7 +1264,7 @@ fn handler_clause<'a>() -> impl Parser<'a, &'a str, HandlerClause, Err<'a>> + Cl
     // `choice()` has an arity limit; split into groups.
     let grp_a = choice((auth, accounts, requires, ensures, modifies, let_c, effect));
     let grp_b = choice((transfers, takes, emits, aborts_total, invariant, include));
-    let grp_c = choice((match_c, call_c, permissionless));
+    let grp_c = choice((match_c, call_c, permissionless, establishes));
     choice((grp_a, grp_b, grp_c))
 }
 

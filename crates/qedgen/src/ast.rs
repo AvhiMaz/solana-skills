@@ -328,6 +328,13 @@ pub enum HandlerClause {
     Emits(String),
     AbortsTotal,
     Invariant(String),
+    /// `establishes Name` — this handler establishes the named invariant
+    /// at post-state. Unlike `invariant Name` (which means "preserves"),
+    /// the harness/proof does NOT assume the invariant holds pre-transition.
+    /// Use for handlers that bring the system from an uninitialized state
+    /// into one where the invariant becomes true, or for one-shot
+    /// transitions that elevate an invariant after the fact.
+    Establishes(String),
     /// `permissionless` — marks the handler as deliberately-unauthenticated.
     /// Opts out of the `no_access_control` P1 lint (v2.7 G4). Mutually
     /// exclusive with `auth X`; check.rs rejects both appearing together.

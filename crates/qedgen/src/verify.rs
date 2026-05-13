@@ -464,24 +464,74 @@ fn tail_lines(s: &str, n: usize) -> String {
 }
 
 pub fn print_human(report: &VerifyReport) {
-    eprintln!("qedgen verify — {}", report.spec.display());
+    eprint!("{}", format_human(report));
+}
+
+/// Format the full human-readable verify report. Separated from `print_human`
+/// so tests can pin the exact rendering without stderr capture; `print_human`
+/// is the side-effecting thin wrapper. Returns a string ending in a newline.
+pub fn format_human(report: &VerifyReport) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("qedgen verify — {}\n", report.spec.display()));
     for b in &report.backends {
         let marker = match b.status {
             BackendStatus::Passed => "PASS",
             BackendStatus::Failed => "FAIL",
             BackendStatus::Skipped => "SKIP",
         };
-        eprintln!("  [{}] {:<10} ({} ms)", marker, b.name, b.duration_ms);
+        out.push_str(&format!(
+            "  [{}] {:<10} ({} ms)\n",
+            marker, b.name, b.duration_ms
+        ));
         if let Some(d) = &b.detail {
             for line in d.lines() {
-                eprintln!("         {}", line);
+                out.push_str(&format!("         {}\n", line));
             }
         }
+        format_counterexamples(&mut out, &b.counterexamples);
     }
     if report.ok() {
-        eprintln!("OK");
+        out.push_str("OK\n");
     } else {
-        eprintln!("FAILED");
+        out.push_str("FAILED\n");
+    }
+    out
+}
+
+/// Render each backend's structured counterexamples below its status line,
+/// one block per failing harness with the spec-named `var = value` pairs the
+/// per-backend parser extracted. Both the kani parser (CBMC state blocks)
+/// and the proptest parser already preserve spec binder names from the
+/// generated harness — this fn is just the human surface for that data.
+/// JSON consumers see the same data via `BackendReport.counterexamples`.
+fn format_counterexamples(out: &mut String, cxs: &[Counterexample]) {
+    for cx in cxs {
+        out.push_str(&format!("         counterexample: {}\n", cx.harness));
+        if let Some(msg) = &cx.failure_message {
+            out.push_str(&format!("           {}\n", msg));
+        }
+        if let Some(loc) = &cx.source_location {
+            out.push_str(&format!("           at {}\n", loc));
+        }
+        if !cx.assignments.is_empty() {
+            let name_width = cx
+                .assignments
+                .iter()
+                .map(|a| a.name.len())
+                .max()
+                .unwrap_or(0);
+            for a in &cx.assignments {
+                out.push_str(&format!(
+                    "             {:<width$} = {}\n",
+                    a.name,
+                    a.value,
+                    width = name_width
+                ));
+            }
+        }
+        if let Some(seed) = &cx.seed {
+            out.push_str(&format!("           seed: {}\n", seed));
+        }
     }
 }
 
@@ -489,4 +539,183 @@ pub fn print_json(report: &VerifyReport) -> Result<()> {
     let s = serde_json::to_string_pretty(report).context("serializing verify report")?;
     println!("{}", s);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::verify_counterexample::{Counterexample, CounterexampleVar};
+
+    fn cx_kani_overflow() -> Counterexample {
+        Counterexample {
+            harness: "probe_overflow_transfer".into(),
+            status: "failed".into(),
+            assignments: vec![
+                CounterexampleVar {
+                    name: "pre".into(),
+                    value: "18446744073709551615ul".into(),
+                    line: Some(38),
+                },
+                CounterexampleVar {
+                    name: "amount".into(),
+                    value: "1ul".into(),
+                    line: Some(39),
+                },
+                CounterexampleVar {
+                    name: "post".into(),
+                    value: "0ul".into(),
+                    line: Some(40),
+                },
+            ],
+            seed: None,
+            failure_message: Some(
+                "assertion failed: post == pre.checked_add(amount).unwrap_or(0)".into(),
+            ),
+            source_location: Some("tests/kani.rs:42:5".into()),
+        }
+    }
+
+    fn cx_proptest_lifecycle() -> Counterexample {
+        Counterexample {
+            harness: "deposit_preserves_lifecycle".into(),
+            status: "failed".into(),
+            assignments: vec![
+                CounterexampleVar {
+                    name: "deposit_amount".into(),
+                    value: "0".into(),
+                    line: None,
+                },
+                CounterexampleVar {
+                    name: "receive_amount".into(),
+                    value: "42".into(),
+                    line: None,
+                },
+            ],
+            seed: Some("proptest-regressions/lib.txt::cc 0123".into()),
+            failure_message: Some("deposit must reject zero amount".into()),
+            source_location: None,
+        }
+    }
+
+    #[test]
+    fn renders_kani_counterexample_with_named_assignments() {
+        let report = VerifyReport {
+            spec: PathBuf::from("program.qedspec"),
+            backends: vec![BackendReport {
+                name: "kani",
+                status: BackendStatus::Failed,
+                duration_ms: 1234,
+                detail: Some("1 of 2 failed".into()),
+                log_path: None,
+                counterexamples: vec![cx_kani_overflow()],
+            }],
+        };
+        let out = format_human(&report);
+        // Named-value assignments render in human output, not just JSON
+        // (this is the v2.17 fix — the kani parser already extracted them,
+        // print_human just wasn't rendering them).
+        assert!(out.contains("counterexample: probe_overflow_transfer"));
+        assert!(out.contains("at tests/kani.rs:42:5"));
+        assert!(out.contains("pre    = 18446744073709551615ul"));
+        assert!(out.contains("amount = 1ul"));
+        assert!(out.contains("post   = 0ul"));
+        // Width-aligned columns: shorter name gets right-padding to longest.
+        // Filter for assignment rows specifically (13-space indent + name) so
+        // we don't match the failure-message line that contains `post == ...`.
+        let pre_line = out
+            .lines()
+            .find(|l| l.starts_with("             pre"))
+            .unwrap();
+        let post_line = out
+            .lines()
+            .find(|l| l.starts_with("             post"))
+            .unwrap();
+        let pre_eq = pre_line.find('=').unwrap();
+        let post_eq = post_line.find('=').unwrap();
+        assert_eq!(pre_eq, post_eq, "name column should be width-aligned");
+    }
+
+    #[test]
+    fn renders_proptest_counterexample_with_seed() {
+        let report = VerifyReport {
+            spec: PathBuf::from("program.qedspec"),
+            backends: vec![BackendReport {
+                name: "proptest",
+                status: BackendStatus::Failed,
+                duration_ms: 50,
+                detail: None,
+                log_path: None,
+                counterexamples: vec![cx_proptest_lifecycle()],
+            }],
+        };
+        let out = format_human(&report);
+        assert!(out.contains("counterexample: deposit_preserves_lifecycle"));
+        assert!(out.contains("deposit must reject zero amount"));
+        assert!(out.contains("deposit_amount = 0"));
+        assert!(out.contains("receive_amount = 42"));
+        assert!(out.contains("seed: proptest-regressions/lib.txt::cc 0123"));
+    }
+
+    #[test]
+    fn renders_multiple_backends_with_mixed_status() {
+        let report = VerifyReport {
+            spec: PathBuf::from("program.qedspec"),
+            backends: vec![
+                BackendReport {
+                    name: "proptest",
+                    status: BackendStatus::Passed,
+                    duration_ms: 12,
+                    detail: None,
+                    log_path: None,
+                    counterexamples: vec![],
+                },
+                BackendReport {
+                    name: "kani",
+                    status: BackendStatus::Failed,
+                    duration_ms: 4567,
+                    detail: Some("1 of 1 failed".into()),
+                    log_path: None,
+                    counterexamples: vec![cx_kani_overflow()],
+                },
+                BackendReport {
+                    name: "lean",
+                    status: BackendStatus::Skipped,
+                    duration_ms: 0,
+                    detail: Some("no lakefile".into()),
+                    log_path: None,
+                    counterexamples: vec![],
+                },
+            ],
+        };
+        let out = format_human(&report);
+        assert!(out.contains("[PASS] proptest"));
+        assert!(out.contains("[FAIL] kani"));
+        assert!(out.contains("[SKIP] lean"));
+        // Only the failed backend renders its counterexample block.
+        assert!(out.contains("counterexample: probe_overflow_transfer"));
+        // Counterexamples are nested under their backend's block, not at
+        // top level — verify the order: kani line, then its counterexample.
+        let kani_idx = out.find("[FAIL] kani").unwrap();
+        let cx_idx = out.find("counterexample:").unwrap();
+        assert!(cx_idx > kani_idx);
+        assert!(out.ends_with("FAILED\n"));
+    }
+
+    #[test]
+    fn passing_report_omits_counterexamples_and_ends_ok() {
+        let report = VerifyReport {
+            spec: PathBuf::from("program.qedspec"),
+            backends: vec![BackendReport {
+                name: "kani",
+                status: BackendStatus::Passed,
+                duration_ms: 100,
+                detail: None,
+                log_path: None,
+                counterexamples: vec![],
+            }],
+        };
+        let out = format_human(&report);
+        assert!(!out.contains("counterexample"));
+        assert!(out.ends_with("OK\n"));
+    }
 }

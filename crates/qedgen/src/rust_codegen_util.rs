@@ -616,6 +616,34 @@ pub fn emit_state_struct(
 
 /// Emit property predicate functions from spec properties.
 /// `wrapping` controls whether arithmetic expressions use wrapping_add/wrapping_sub.
+/// Emit `fn {inv_name}(s: &State) -> bool { <rust_expr> }` for each invariant
+/// that has a Rust body and is referenced by at least one handler. v2.17.x
+/// wire-up: prior to this, `ParsedInvariant.rust_expr` was populated by the
+/// adapter but never consumed by any backend; only the Lean theorem path
+/// emitted. Description-only invariants (no `rust_expr`) and unsupported
+/// quantifier bodies are skipped silently. The caller is expected to
+/// pre-filter to invariants that are actually relevant for the current
+/// account section / state shape; this fn just emits what it's given.
+pub fn emit_invariant_predicates(out: &mut String, invariants: &[&crate::check::ParsedInvariant]) {
+    for inv in invariants {
+        let Some(rust_expr) = inv.rust_expr.as_deref() else {
+            continue;
+        };
+        if crate::check::rust_expr_is_unsupported(rust_expr) {
+            continue;
+        }
+        let doc_body = inv
+            .lean_expr
+            .as_deref()
+            .map(|le| format!(" — {}", le))
+            .unwrap_or_default();
+        out.push_str(&format!("/// Invariant: {}{}\n", inv.name, doc_body));
+        out.push_str(&format!("fn {}(s: &State) -> bool {{\n", inv.name));
+        out.push_str(&format!("    {}\n", rust_expr));
+        out.push_str("}\n\n");
+    }
+}
+
 pub fn emit_property_predicates(out: &mut String, properties: &[ParsedProperty], wrapping: bool) {
     for prop in properties {
         // Prefer the AST-rendered Rust form (handles implies/forall correctly,

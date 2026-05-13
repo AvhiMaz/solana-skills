@@ -382,7 +382,8 @@ handler transfer_sol { ... }
 | `emits Event` | Event emission | `emits PoolInitialized` |
 | `match { ... }` | Guarded branching | see below |
 | `aborts_total` | Handler must reject on all guard failures | `aborts_total` |
-| `invariant name` | Reference a global invariant | `invariant conservation` |
+| `invariant name` | Preserve a global invariant (assume pre, assert post) | `invariant conservation` |
+| `establishes name` | Establish a global invariant at post-state without assuming it pre-state. Use for init / one-shot handlers. | `establishes root_set` |
 | `include schema` | Include a schema's clauses | `include base_validation` |
 | `permissionless` | Opt out of the `no_access_control` lint (v2.7) | see below |
 | `takes { ... }` | Parameters (sugar, prefer signature) | `takes amount : U64` |
@@ -748,6 +749,44 @@ invariant conservation "total tokens preserved across initialize, exchange, canc
 
 invariant pda_integrity "derived PDA matches provided account on initialize"
 ```
+
+#### Handler linkage: `invariant Foo` vs `establishes Foo`
+
+When a handler block carries one of:
+
+- **`invariant Foo`** — the handler *preserves* `Foo`. Generated Kani / proptest
+  harnesses assume `Foo` holds pre-transition and assert it holds post-transition.
+- **`establishes Foo`** — the handler *establishes* `Foo`. Harnesses skip the
+  pre-assume and only assert post. Use for init handlers (the system isn't yet
+  in a state where `Foo` could meaningfully hold), one-shot graduations that
+  elevate an invariant after the fact, or any transition whose contract is
+  "outcome only, no precondition."
+
+```fsharp
+invariant root_set :
+  state.root != ZERO_ROOT
+
+handler init : State.Active -> State.Active {
+  establishes root_set
+  effect { root := <derived_pda> }
+}
+
+handler update : State.Active -> State.Active {
+  invariant root_set       // preserves: assume root_set pre, assert post
+  requires state.root != ZERO_ROOT
+  effect { root := <new_root> }
+}
+```
+
+Both forms generate per-handler harnesses (Kani `verify_X_preserves_Y` /
+`verify_X_establishes_Y`, proptest `X_preserves_Y` / `X_establishes_Y`) when
+the invariant has a Rust-renderable body. Description-only invariants
+(string form) stay documentation-only and emit no Rust harness.
+
+The Lean side currently emits the invariant as a standalone predicate-stated
+theorem; per-handler Lean preservation theorems for invariants are not yet
+emitted (the Rust harnesses are the active gate today). State-machine
+`property` blocks with `preserved_by` still produce Lean per-handler theorems.
 
 ### `cover` — reachability
 

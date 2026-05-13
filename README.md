@@ -55,7 +55,7 @@ npx skills add qedgen/solana-skills
 | **Access control** | Signer checks, authority constraints |
 | **CPI correctness** | Correct program, accounts, flags, and discriminator for each invocation (axiomatic, pure `rfl`) |
 | **State machines** | Lifecycle correctness, one-shot safety |
-| **Conservation** | Custom invariants (token totals, vault bounds) preserved across operations |
+| **Conservation** | Named `invariant`s and `property`s preserved (or `establishes`-ed) across operations. Per-handler proptest + Kani harnesses fire when the body has a Rust rendering; Lean theorems back the proofs. |
 | **Arithmetic safety** | Overflow/underflow for fixed-width integers, U64 bounds |
 | **Input validation** | Account count, duplicates, data length, discriminators, parameter bounds — each guard maps to a specific error exit |
 | **Memory correctness** | Stack/heap disjointness, pointer arithmetic (sBPF) |

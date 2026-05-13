@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::path::Path;
 
-use crate::check::{self, ParsedHandler, ParsedProperty, ParsedSpec};
+use crate::check::{self, ParsedHandler, ParsedInvariant, ParsedProperty, ParsedSpec};
 use crate::codegen::map_type;
 use crate::rust_codegen_util;
 
@@ -514,6 +514,29 @@ fn emit_account_section(
         }
     }
 
+    // Invariant predicates — only emit for invariants referenced by at least
+    // one handler's `invariants` list AND that have a rust_expr body (i.e.
+    // not description-only). v2.17 wire-up: prior to this, ParsedInvariant
+    // .rust_expr was populated by the adapter but never consumed by any
+    // backend. QEDGen already had the parser + adapter + handler-clause
+    // path — only the Rust harness consumption was missing.
+    let linked_invs: Vec<&ParsedInvariant> = spec
+        .invariants
+        .iter()
+        .filter(|i| {
+            i.rust_expr
+                .as_ref()
+                .map(|r| !crate::check::rust_expr_is_unsupported(r))
+                .unwrap_or(false)
+        })
+        .filter(|i| {
+            handlers
+                .iter()
+                .any(|h| h.invariants.contains(&i.name) || h.establishes.contains(&i.name))
+        })
+        .collect();
+    rust_codegen_util::emit_invariant_predicates(out, &linked_invs);
+
     // Transition functions
     emit_transition_functions_for(out, handlers, spec)?;
 
@@ -523,6 +546,14 @@ fn emit_account_section(
     // Property preservation tests
     if !props_with_expr.is_empty() {
         emit_preservation_tests_for(out, handlers, &owned_props, mutable_fields, spec)?;
+    }
+
+    // Invariant preservation tests — one per (handler, invariant-it-claims-to-preserve)
+    // pair. Iterates the relationship from the handler side (handler.invariants)
+    // since that's where the spec records it; properties iterate from the
+    // property side (prop.preserved_by). Same logical join, different storage.
+    if !linked_invs.is_empty() {
+        emit_invariant_preservation_tests_for(out, handlers, &linked_invs, mutable_fields, spec)?;
     }
 
     // Guard enforcement tests
@@ -787,6 +818,108 @@ fn emit_preservation_tests_for(
             out.push_str(&format!(
                 "                \"{} must hold after {}\");\n",
                 prop.name, op_name
+            ));
+            out.push_str("        }\n");
+            out.push_str("    }\n");
+            out.push_str("}\n\n");
+        }
+    }
+    Ok(())
+}
+
+/// Emit one proptest per `(handler, invariant)` where the handler's spec
+/// carries `invariant Name` as a clause. The shape mirrors
+/// `emit_preservation_tests_for` for state-machine properties but
+/// (a) iterates the join from the handler side, since `handler.invariants`
+/// is where the relationship is stored, and (b) only emits when the
+/// invariant has a `rust_expr` body — description-only invariants and those
+/// whose body uses an unsupported quantifier (per
+/// `rust_expr_is_unsupported`) are skipped silently.
+fn emit_invariant_preservation_tests_for(
+    out: &mut String,
+    handlers: &[&ParsedHandler],
+    invariants: &[&ParsedInvariant],
+    mutable_fields: &[&(String, String)],
+    spec: &ParsedSpec,
+) -> Result<()> {
+    for op in handlers {
+        let op_name = &op.name;
+        // Walk both clauses. `invariant Name` means "preserves" — assume the
+        // invariant pre-state. `establishes Name` skips the pre-assume; the
+        // handler only owes us the invariant at post-state.
+        let pairs: Vec<(&String, bool)> = op
+            .invariants
+            .iter()
+            .map(|n| (n, false))
+            .chain(op.establishes.iter().map(|n| (n, true)))
+            .collect();
+        for (inv_name, is_establish) in pairs {
+            // Skip if no matching invariant decl (dangling reference)
+            // OR if the invariant has no rust body. The current account
+            // section's `linked_invs` filter ensures we only enter this
+            // branch when at least one handler links to a body-having
+            // invariant, but the per-handler join still needs the lookup.
+            let Some(inv) = invariants.iter().find(|i| &i.name == inv_name) else {
+                continue;
+            };
+            let is_init = op.pre_status.as_deref() == Some("Uninitialized");
+
+            out.push_str("proptest! {\n");
+            out.push_str("    #![proptest_config(ProptestConfig { max_global_rejects: 65536, ..ProptestConfig::with_cases(256) })]\n");
+            out.push_str("    #[test]\n");
+
+            let mut param_parts = Vec::new();
+            if !is_init {
+                param_parts.push("s in arb_state()".to_string());
+            }
+            for (pname, ptype) in &op.takes_params {
+                let rust_type = map_type(ptype, spec)?;
+                param_parts.push(format!("{} in 0{}..={}::MAX", pname, rust_type, rust_type));
+            }
+            if param_parts.is_empty() && is_init {
+                param_parts.push("_dummy in 0u8..1u8".to_string());
+            }
+
+            let verb = if is_establish {
+                "establishes"
+            } else {
+                "preserves"
+            };
+            out.push_str(&format!(
+                "    fn {}_{}_{}({}) {{\n",
+                op_name,
+                verb,
+                inv.name,
+                param_parts.join(", ")
+            ));
+
+            if is_init {
+                out.push_str("        let mut s = State {\n");
+                for (fname, _) in mutable_fields {
+                    out.push_str(&format!("            {}: 0,\n", fname));
+                }
+                out.push_str("        };\n");
+            } else {
+                out.push_str("        let mut s = s;\n");
+                // `invariant X` (preserves): assume X pre-state.
+                // `establishes X`: skip the pre-assume — the handler is
+                // expected to establish X at post-state without it
+                // necessarily holding pre-state.
+                if !is_establish {
+                    out.push_str(&format!("        prop_assume!({}(&s));\n", inv.name));
+                }
+            }
+
+            let args: String = op
+                .takes_params
+                .iter()
+                .map(|(n, _)| format!(", {}", n))
+                .collect();
+            out.push_str(&format!("        if {}(&mut s{}) {{\n", op_name, args));
+            out.push_str(&format!("            prop_assert!({}(&s),\n", inv.name));
+            out.push_str(&format!(
+                "                \"invariant {} must hold after {}\");\n",
+                inv.name, op_name
             ));
             out.push_str("        }\n");
             out.push_str("    }\n");

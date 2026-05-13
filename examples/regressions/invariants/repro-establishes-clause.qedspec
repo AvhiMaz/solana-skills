@@ -1,0 +1,41 @@
+// Repro: handler-side `establishes Foo` says "this handler guarantees the
+// named invariant holds at post-state, WITHOUT assuming it pre-state."
+//
+// Different from `invariant Foo` (which is `preserves`: assume pre, assert
+// post). Use `establishes` for init handlers that bring the system into a
+// state where the invariant first becomes true, or for one-shot transitions
+// that elevate an invariant after the fact.
+//
+// Expected codegen:
+//   Kani: `verify_init_establishes_root_set` — symbolic state, NO
+//     `kani::assume(root_set(&s))`, but final `assert!(root_set(&s))`.
+//   Kani: `verify_update_preserves_root_set` — symbolic state WITH
+//     `kani::assume(root_set(&s))`, final `assert!(root_set(&s))`.
+//   Proptest mirrors the same shape.
+
+spec ReproEstablishes
+program_id "11111111111111111111111111111111"
+
+const ZERO_ROOT = 0
+
+type State
+  | Active of { root : U64 }
+
+type Error
+  | E
+
+invariant root_set :
+  state.root != ZERO_ROOT
+
+handler init : State.Active -> State.Active {
+  permissionless
+  establishes root_set
+  effect { root := 42 }
+}
+
+handler update : State.Active -> State.Active {
+  permissionless
+  invariant root_set
+  requires state.root != ZERO_ROOT
+  effect { root := state.root }
+}

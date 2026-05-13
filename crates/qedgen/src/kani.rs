@@ -162,6 +162,37 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
         rust_codegen_util::emit_property_predicates(&mut out, &spec.properties, false);
     }
 
+    // ── Invariant predicates ─────────────────────────────────────────────
+    // Only emit predicates for invariants linked from at least one handler
+    // (`invariant Name` clause inside a handler block). Standalone top-level
+    // invariants without any handler claiming preservation get no Kani body
+    // — there's nothing for BMC to check against. Description-only
+    // invariants are filtered out by emit_invariant_predicates' rust_expr
+    // check.
+    let linked_invs: Vec<&crate::check::ParsedInvariant> = spec
+        .invariants
+        .iter()
+        .filter(|i| {
+            spec.handlers
+                .iter()
+                .any(|h| h.invariants.contains(&i.name) || h.establishes.contains(&i.name))
+        })
+        .collect();
+    if !linked_invs.is_empty() {
+        out.push_str(
+            "// ============================================================================\n",
+        );
+        out.push_str("// Invariant predicates (from qedspec `invariant` declarations linked via\n");
+        out.push_str(
+            "// handler-side `invariant Name` clauses). v2.17.x wires ParsedInvariant.rust_expr\n",
+        );
+        out.push_str("// through to per-(handler, invariant) BMC preservation harnesses below.\n");
+        out.push_str(
+            "// ============================================================================\n\n",
+        );
+        rust_codegen_util::emit_invariant_predicates(&mut out, &linked_invs);
+    }
+
     // ── Transition functions ─────────────────────────────────────────────
     out.push_str(
         "// ============================================================================\n",
@@ -392,6 +423,100 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
                 out.push_str(&format!(
                     "            \"{} must hold after {}\");\n",
                     prop.name, op_name
+                ));
+                out.push_str("    }\n");
+                out.push_str("}\n\n");
+            }
+        }
+    }
+
+    // ── Invariant preservation proofs ────────────────────────────────────
+    // For each handler that carries `invariant Name` in its clause list,
+    // emit a BMC harness that asserts the invariant holds post-transition
+    // when it held pre-transition. Same shape as the property-preservation
+    // loop above but iterates the join from the handler side (where
+    // ParsedHandler.invariants stores the relationship).
+    if !linked_invs.is_empty() {
+        out.push_str(
+            "// ============================================================================\n",
+        );
+        out.push_str(
+            "// Invariant preservation — `invariant Name` on a handler asserts the named\n",
+        );
+        out.push_str("// top-level invariant holds before AND after the handler runs. Each pair\n");
+        out.push_str("// becomes its own BMC proof.\n");
+        out.push_str(
+            "// ============================================================================\n\n",
+        );
+
+        for op in &spec.handlers {
+            // Walk both `invariant Name` (preserves) and `establishes Name`
+            // clauses; the bool is_establish controls whether to assume the
+            // invariant pre-state. Establish skips the pre-assume so the
+            // harness checks "after this handler runs, X holds" regardless
+            // of pre-state. Preserves wraps the pre-state in an assume so
+            // BMC starts in a state where X already holds.
+            let pairs: Vec<(&String, bool)> = op
+                .invariants
+                .iter()
+                .map(|n| (n, false))
+                .chain(op.establishes.iter().map(|n| (n, true)))
+                .collect();
+            for (inv_name, is_establish) in pairs {
+                let Some(inv) = linked_invs.iter().find(|i| &i.name == inv_name) else {
+                    continue;
+                };
+                if inv
+                    .rust_expr
+                    .as_deref()
+                    .map(crate::check::rust_expr_is_unsupported)
+                    .unwrap_or(true)
+                {
+                    continue;
+                }
+                let is_init = op.pre_status.as_deref() == Some("Uninitialized");
+
+                out.push_str("#[kani::proof]\n");
+                out.push_str("#[kani::unwind(2)]\n");
+                out.push_str("#[kani::solver(cadical)]\n");
+                let verb = if is_establish {
+                    "establishes"
+                } else {
+                    "preserves"
+                };
+                out.push_str(&format!(
+                    "fn verify_{}_{}_{}() {{\n",
+                    op.name, verb, inv.name
+                ));
+
+                if is_init {
+                    emit_state_init_zeroed(&mut out, &mutable_fields, &spec);
+                } else {
+                    emit_state_init_symbolic(&mut out, &mutable_fields, &spec);
+                    emit_pre_status_assume(&mut out, op, &spec);
+                    if !is_establish {
+                        out.push_str(&format!("    kani::assume({}(&s));\n", inv.name));
+                    }
+                }
+
+                for (pname, ptype) in &op.takes_params {
+                    out.push_str(&format!(
+                        "    let {}: {} = kani::any();\n",
+                        pname,
+                        map_type(ptype, &spec)?
+                    ));
+                }
+
+                let args: String = op
+                    .takes_params
+                    .iter()
+                    .map(|(n, _)| format!(", {}", n))
+                    .collect();
+                out.push_str(&format!("    if {}(&mut s{}) {{\n", op.name, args));
+                out.push_str(&format!("        assert!({}(&s),\n", inv.name));
+                out.push_str(&format!(
+                    "            \"invariant {} must hold after {}\");\n",
+                    inv.name, op.name
                 ));
                 out.push_str("    }\n");
                 out.push_str("}\n\n");
@@ -843,10 +968,34 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
         .filter(|p| p.expression.is_some())
         .map(|p| p.preserved_by.len())
         .sum();
+    // Count of `verify_{handler}_preserves_{inv}` harnesses emitted above —
+    // one per (handler, invariant) pair where the invariant has a usable
+    // rust_expr body. Matches the emission gate, so the printed total is
+    // accurate.
+    let invariant_count: usize = spec
+        .handlers
+        .iter()
+        .flat_map(|h| {
+            h.invariants
+                .iter()
+                .chain(h.establishes.iter())
+                .map(move |inv_name| (h, inv_name))
+        })
+        .filter(|(_, inv_name)| {
+            linked_invs.iter().any(|i| {
+                &i.name == *inv_name
+                    && i.rust_expr
+                        .as_deref()
+                        .map(|r| !crate::check::rust_expr_is_unsupported(r))
+                        .unwrap_or(false)
+            })
+        })
+        .count();
     let effect_count = effect_ops.len();
     let overflow_count = overflow_ops.len();
     let abort_count: usize = abort_ops.iter().map(|op| op.aborts_if.len()).sum();
-    let total = guard_count + prop_count + effect_count + overflow_count + abort_count;
+    let total =
+        guard_count + prop_count + invariant_count + effect_count + overflow_count + abort_count;
 
     eprintln!(
         "Generated {} Kani harnesses in {}",
@@ -858,6 +1007,9 @@ pub fn generate(spec_path: &Path, output_path: &Path) -> Result<()> {
     }
     if prop_count > 0 {
         eprintln!("  {} property preservation proof(s)", prop_count);
+    }
+    if invariant_count > 0 {
+        eprintln!("  {} invariant preservation proof(s)", invariant_count);
     }
     if effect_count > 0 {
         eprintln!("  {} effect conformance proof(s)", effect_count);
