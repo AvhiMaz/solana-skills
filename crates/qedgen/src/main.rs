@@ -2,6 +2,7 @@ mod anchor_adapt;
 mod anchor_check;
 mod anchor_project;
 mod anchor_resolver;
+mod pinocchio_adapt;
 mod api;
 mod aristotle;
 mod asm2lean;
@@ -1260,32 +1261,58 @@ async fn main() -> Result<()> {
             out,
             handler_overrides,
         } => {
-            let mut overrides = std::collections::HashMap::new();
-            for raw in &handler_overrides {
-                let (name, parsed) = anchor_adapt::parse_handler_override(raw)?;
-                overrides.insert(name, parsed);
-            }
-            match spec {
-                Some(spec_path) => {
-                    let entries =
-                        anchor_adapt::compute_attributes(&program, &spec_path, &overrides)?;
-                    let rendered = anchor_adapt::render_attributes(&entries);
-                    if let Some(path) = out {
-                        if let Some(parent) = path.parent() {
-                            std::fs::create_dir_all(parent)?;
-                        }
-                        std::fs::write(&path, &rendered)?;
-                        eprintln!("Wrote {} ({} bytes)", path.display(), rendered.len());
-                    } else {
-                        print!("{}", rendered);
-                    }
+            if pinocchio_adapt::is_pinocchio_project(&program) {
+                // Pinocchio programs don't have an Anchor IDL or a `#[program]`
+                // mod. The attribute-stamp path (`--spec`) doesn't apply.
+                // Route both the one-shot and file-write paths to the Pinocchio
+                // adapter; warn when `--spec` is supplied since it's a no-op here.
+                if spec.is_some() {
+                    eprintln!(
+                        "qedgen: Pinocchio project detected. \
+                         `--spec` (attribute-stamp mode) is not supported for \
+                         Pinocchio programs yet. Generating a fresh .qedspec instead."
+                    );
                 }
-                None => {
-                    if let Some(path) = out {
-                        anchor_adapt::adapt_to_file(&program, &path, &overrides)?;
-                    } else {
-                        let rendered = anchor_adapt::adapt(&program, &overrides)?;
-                        print!("{}", rendered);
+                if !handler_overrides.is_empty() {
+                    eprintln!(
+                        "qedgen: `--handler` overrides are not used for Pinocchio adapt \
+                         (dispatch is parsed directly from the entrypoint match table)."
+                    );
+                }
+                if let Some(path) = out {
+                    pinocchio_adapt::adapt_to_file(&program, &path)?;
+                } else {
+                    let rendered = pinocchio_adapt::adapt(&program)?;
+                    print!("{}", rendered);
+                }
+            } else {
+                let mut overrides = std::collections::HashMap::new();
+                for raw in &handler_overrides {
+                    let (name, parsed) = anchor_adapt::parse_handler_override(raw)?;
+                    overrides.insert(name, parsed);
+                }
+                match spec {
+                    Some(spec_path) => {
+                        let entries =
+                            anchor_adapt::compute_attributes(&program, &spec_path, &overrides)?;
+                        let rendered = anchor_adapt::render_attributes(&entries);
+                        if let Some(path) = out {
+                            if let Some(parent) = path.parent() {
+                                std::fs::create_dir_all(parent)?;
+                            }
+                            std::fs::write(&path, &rendered)?;
+                            eprintln!("Wrote {} ({} bytes)", path.display(), rendered.len());
+                        } else {
+                            print!("{}", rendered);
+                        }
+                    }
+                    None => {
+                        if let Some(path) = out {
+                            anchor_adapt::adapt_to_file(&program, &path, &overrides)?;
+                        } else {
+                            let rendered = anchor_adapt::adapt(&program, &overrides)?;
+                            print!("{}", rendered);
+                        }
                     }
                 }
             }
