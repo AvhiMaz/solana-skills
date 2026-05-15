@@ -166,6 +166,20 @@ pub fn construct_reproducer(
             // time. Drop with a clear failure.
             Err(ConstructFailure::NotImplemented)
         }
+        // v2.19 Pinocchio categories: reproducers are MolluskPrompt /
+        // MiriPrompt structured prompts the audit subagent expands.
+        // pinocchio_probe.rs::scan_program attaches the prompt at site
+        // discovery time, so spec-aware findings flowing through this
+        // dispatcher are out-of-band — drop with NotImplemented.
+        Category::PinocchioUncheckedAccountLoad
+        | Category::PinocchioUncheckedArith
+        | Category::PinocchioAccountTypeConfusion
+        | Category::PinocchioMutableBorrowAliasing
+        | Category::PinocchioPositionWithoutTypeTag
+        | Category::PinocchioOffsetOverrun
+        | Category::PinocchioMissingPdaVerification
+        | Category::PinocchioStaleSafetyComment
+        | Category::ExecutionDivergence => Err(ConstructFailure::NotImplemented),
     }
 }
 

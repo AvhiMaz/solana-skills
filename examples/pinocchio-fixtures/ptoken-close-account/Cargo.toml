@@ -1,0 +1,9 @@
+[package]
+name = "ptoken-close-account-fixture"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+pinocchio = "0.6"
+pinocchio-token = "0.3"

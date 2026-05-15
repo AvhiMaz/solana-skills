@@ -1,0 +1,10 @@
+[package]
+name = "pata-create-fixture"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+pinocchio = "0.6"
+pinocchio-system = "0.3"
+pinocchio-token = "0.3"

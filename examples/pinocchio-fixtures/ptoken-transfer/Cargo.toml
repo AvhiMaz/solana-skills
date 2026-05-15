@@ -1,0 +1,13 @@
+# Fixture-only Cargo.toml — used solely by `qedgen probe --program` for
+# Pinocchio dep detection. NOT in the workspace `members` (the source
+# is read as text by the scanner, not compiled here).
+[package]
+name = "ptoken-transfer-fixture"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# This is the dep that triggers `Runtime::Pinocchio` detection.
+pinocchio = "0.6"
+pinocchio-token = "0.3"

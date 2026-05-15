@@ -1,0 +1,16 @@
+{
+  "expected_count": 9,
+  "expected_runtime": "pinocchio",
+  "expected_categories": [
+    [
+      "pinocchio_stale_safety_comment",
+      "pinocchio_stale_safety_comment",
+      "medium"
+    ],
+    [
+      "pinocchio_unchecked_account_load",
+      "unchecked_account_load",
+      "high"
+    ]
+  ]
+}

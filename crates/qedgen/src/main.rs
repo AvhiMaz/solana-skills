@@ -26,6 +26,8 @@ mod integration_test;
 mod interface_gen;
 mod kani;
 mod lean_gen;
+mod miri_verify;
+mod pinocchio_probe;
 mod probe;
 mod probe_repro;
 mod project;
@@ -80,6 +82,18 @@ pub(crate) enum Target {
     /// Pinocchio (no_std) Rust program. Reserved CLI surface; codegen
     /// is not yet implemented and selecting it errors.
     Pinocchio,
+}
+
+/// Runtime override for `qedgen probe --runtime <X>`. v2.19 adds the
+/// Pinocchio surface; other entries are reserved for parity with the
+/// detector but route through the generic bootstrap envelope today.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub(crate) enum RuntimeOverride {
+    Pinocchio,
+    Anchor,
+    Quasar,
+    Native,
+    Sbpf,
 }
 
 #[derive(Subcommand)]
@@ -231,6 +245,22 @@ enum Commands {
         /// `programs/lending` for an Anchor project)
         #[arg(long)]
         root: Option<PathBuf>,
+
+        /// Pinocchio audit mode (v2.19). Walks `<path>` and emits the
+        /// site catalogue + SAFETY-comment metadata the audit subagent
+        /// consumes. Detection auto-routes via `Cargo.toml` (`pinocchio`
+        /// dep), so `--program <path>` is the same as `--bootstrap
+        /// --root <path>` when the runtime is Pinocchio — `--program`
+        /// is the user-facing alias documented in the PRD.
+        #[arg(long, conflicts_with_all = ["spec", "bootstrap"])]
+        program: Option<PathBuf>,
+
+        /// Override runtime detection (`pinocchio`, `anchor`, `quasar`,
+        /// `native`, `sbpf`). Only `pinocchio` has dedicated probe
+        /// output today; the others fall back to the generic bootstrap
+        /// envelope.
+        #[arg(long, value_enum)]
+        runtime: Option<RuntimeOverride>,
 
         /// Coverage-guided fuzz probe engine (v2.18). Drives a generated
         /// Crucible harness for the given budget and converts each crash
@@ -472,6 +502,14 @@ enum Commands {
         /// Path to the Lean project directory
         #[arg(long, default_value = "./formal_verification")]
         lean_dir: PathBuf,
+
+        /// v2.19: run Pinocchio Miri reproducers under
+        /// `.qed/probes/pinocchio/*/repro_miri.rs` via
+        /// `cargo +nightly miri test`. UB / aliasing / overflow
+        /// diagnostics surface as findings; dual-execution divergence
+        /// against Mollusk repros surfaces as Critical.
+        #[arg(long)]
+        miri: bool,
 
         /// Stop on the first failing backend
         #[arg(long)]
@@ -1330,11 +1368,64 @@ async fn main() -> Result<()> {
             spec,
             bootstrap,
             root,
+            program,
+            runtime,
             fuzz,
             harness_dir,
             no_smoke,
             stateful,
         } => {
+            // v2.19: --program <path> (with optional --runtime pinocchio)
+            // routes through the Pinocchio site enumerator and emits a
+            // probe-shaped JSON envelope whose `findings` are the
+            // site catalogue mapped 1:1 to candidate findings. The
+            // audit subagent picks the relevant probe markdown per
+            // site kind and writes the reproducer.
+            if let Some(prog_root) = &program {
+                let is_pinocchio = matches!(runtime, Some(RuntimeOverride::Pinocchio))
+                    || matches!(
+                        probe::detect_runtime_public(prog_root),
+                        probe::Runtime::Pinocchio
+                    );
+                if !is_pinocchio {
+                    eprintln!(
+                        "warning: --program targets {}, which is not detected as Pinocchio; \
+                         emitting bootstrap envelope only. Pass --runtime pinocchio to force.",
+                        prog_root.display()
+                    );
+                    let output = probe::run_bootstrap(prog_root)?;
+                    println!("{}", serde_json::to_string_pretty(&output)?);
+                    return Ok(());
+                }
+                let catalogue = pinocchio_probe::scan_program(prog_root)?;
+                let findings = pinocchio_probe::findings_from_catalogue(&catalogue);
+                let output = probe::ProbeOutput {
+                    version: probe::schema_version(),
+                    mode: probe::Mode::SpecLess,
+                    spec_path: None,
+                    project_root: Some(prog_root.display().to_string()),
+                    runtime: Some(probe::Runtime::Pinocchio),
+                    handlers: None,
+                    applicable_categories: Some(probe::applicable_categories_public(
+                        &probe::Runtime::Pinocchio,
+                    )),
+                    findings,
+                };
+                // Top-level envelope: include the raw catalogue so the
+                // subagent has both `findings[]` (per-site mapped) and
+                // the full site list (other kinds the agent may want
+                // to cross-reference).
+                let mut value = serde_json::to_value(&output)?;
+                if let Some(obj) = value.as_object_mut() {
+                    obj.insert(
+                        "pinocchio_catalogue".to_string(),
+                        serde_json::to_value(&catalogue)?,
+                    );
+                }
+                println!("{}", serde_json::to_string_pretty(&value)?);
+                return Ok(());
+            }
+
             // v2.18: --fuzz drives the Crucible engine. Different engine
             // from the pattern-match predicates that run when --fuzz is
             // absent — both produce Findings into the same surface, so
@@ -1823,6 +1914,7 @@ async fn main() -> Result<()> {
             kani_path,
             lean,
             lean_dir,
+            miri,
             fail_fast,
             json,
             check_upstream,
@@ -1859,7 +1951,7 @@ async fn main() -> Result<()> {
                 // When --check-upstream is the only verb, exit cleanly
                 // without firing the backend runners. Combine with
                 // --proptest etc. to do both in one invocation.
-                let any_backend_flag = proptest || kani || lean || probe_repros;
+                let any_backend_flag = proptest || kani || lean || miri || probe_repros;
                 if !any_backend_flag {
                     return Ok(());
                 }
@@ -1884,7 +1976,7 @@ async fn main() -> Result<()> {
                 if !report.all_fired_or_inconclusive() {
                     std::process::exit(1);
                 }
-                let any_backend_flag = proptest || kani || lean;
+                let any_backend_flag = proptest || kani || lean || miri;
                 if !any_backend_flag {
                     return Ok(());
                 }
@@ -1893,7 +1985,19 @@ async fn main() -> Result<()> {
             // No explicit backend flags -> run every backend whose artifact
             // is present on disk. This matches the agent-friendly "just do
             // the right thing" default from the PRD.
-            let any_flag = proptest || kani || lean;
+            let any_flag = proptest || kani || lean || miri;
+            // Project root used by Miri repro discovery — spec parent dir.
+            let project_root = spec
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+            let miri_default = !project_root
+                .join(".qed")
+                .join("probes")
+                .join("pinocchio")
+                .read_dir()
+                .map(|mut it| it.next().is_none())
+                .unwrap_or(true);
             let opts = if any_flag {
                 verify::VerifyOpts {
                     spec: spec.clone(),
@@ -1903,7 +2007,9 @@ async fn main() -> Result<()> {
                     kani_path,
                     lean,
                     lean_dir,
+                    miri,
                     fail_fast,
+                    project_root: project_root.clone(),
                 }
             } else {
                 verify::VerifyOpts {
@@ -1915,7 +2021,9 @@ async fn main() -> Result<()> {
                     lean: lean_dir.join("lakefile.lean").exists()
                         || lean_dir.join("lakefile.toml").exists(),
                     lean_dir,
+                    miri: miri_default,
                     fail_fast,
+                    project_root: project_root.clone(),
                 }
             };
 

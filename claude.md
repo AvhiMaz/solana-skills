@@ -140,6 +140,8 @@ qedgen asm2lean \
 - `check.rs` - Spec validation: lint, coverage matrix, drift detection
 - `lean_gen.rs` - Lean 4 code generation from parsed spec (Rust + sBPF renderers)
 - `codegen.rs` - Rust program skeleton generation from spec (Anchor and Quasar targets fully supported; `--target pinocchio` reserves the CLI surface but is not yet implemented and errors at the init dispatcher)
+- `pinocchio_probe.rs` - v2.19 Pinocchio audit site enumerator. Scans `*.rs` under `src/` for 10 site kinds (`BorrowUnchecked`, `BytemuckCall`, `RawPtrCastFromAccount`, `CustomLoadCall`, `TryIntoUnwrapOnSlice`, `SetLamportsArith`, `SetAmountArith`, `IndexedAccountAccess`, `IndexedDataSlice`, `SafetyComment`), parses adjacent `// SAFETY:` comments, emits a `PinocchioCatalogue` JSON. Maps each site to a candidate `Finding` paired with both `Reproducer::MolluskPrompt` and `Reproducer::MiriPrompt`. Routed via `qedgen probe --program <path>` (auto-detect) or `--runtime pinocchio` (explicit).
+- `miri_verify.rs` - v2.19 Miri verify backend. Discovers `.qed/probes/pinocchio/*/repro_miri.rs`, shells `cargo +nightly miri test`, parses UB / aliasing / overflow / `SAFETY claim STALE` markers into structured `MiriDiagnostic`s. Dual-execution divergence detection (Miri-fail / Mollusk-pass) surfaces as `Category::ExecutionDivergence` (Critical).
 - `kani.rs` - Kani BMC harness generation
 - `proptest_gen.rs` - Proptest harness generation
 - `unit_test.rs` - Unit test generation

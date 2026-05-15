@@ -63,6 +63,31 @@ pub fn require_crucible() -> Result<()> {
     );
 }
 
+/// Check that `cargo +nightly miri` is available. Called by
+/// `qedgen verify --miri` (v2.19).
+pub fn require_miri() -> Result<()> {
+    // Probe via `cargo +nightly miri --version`. The toolchain has to
+    // be a nightly with the `miri` component installed.
+    let out = Command::new("cargo")
+        .args(["+nightly", "miri", "--version"])
+        .output();
+    if let Ok(o) = out {
+        if o.status.success() {
+            return Ok(());
+        }
+    }
+    bail!(
+        "Miri not found on a nightly toolchain. Required for `qedgen verify --miri`.\n\n\
+         Install:\n\
+         \n\
+           rustup toolchain install nightly\n\
+           rustup component add miri --toolchain nightly\n\
+         \n\
+         Then re-run `qedgen verify --miri`. Miri is slow (10-100x native);\n\
+         the v2.19 design caches results per (repro_hash, miri_toolchain_hash).\n"
+    );
+}
+
 /// True if the harness file uses the z3 SMT solver anywhere
 /// (`#[kani::solver(bin = "z3")]`). Factored out so the preflight and
 /// tests share one marker definition.

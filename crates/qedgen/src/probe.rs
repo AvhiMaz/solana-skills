@@ -42,6 +42,7 @@ const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[allow(dead_code)] // Variants populated incrementally across v2.x retrofits
 pub enum Category {
     MissingSigner,
     ArbitraryCpi,
@@ -75,9 +76,47 @@ pub enum Category {
     /// Distinct from the pattern-match categories above: those flag
     /// structural risks; this one carries concrete path evidence.
     CrucibleFuzzCrash,
+    // ----- Pinocchio (v2.19) ----------------------------------------
+    /// `_unchecked` account-data load (e.g. `load_mut::<Account>(
+    /// account.borrow_mut_data_unchecked())`) where the SAFETY comment
+    /// claims owner / init / length / discriminator preconditions the
+    /// agent cannot verify are upheld on every CF path.
+    PinocchioUncheckedAccountLoad,
+    /// Manual arithmetic on token amounts / lamports that doesn't use
+    /// `checked_add` / `checked_sub` and isn't guarded by a bound
+    /// proof. Covers `set_amount(amount() + delta)` and
+    /// `*lamports -= n` patterns.
+    PinocchioUncheckedArith,
+    /// Same `AccountInfo` loaded as type T1 in handler A and T2 in
+    /// handler B without a discriminator distinguishing them — a
+    /// Pinocchio program has no `#[derive(Accounts)]` validating layout.
+    PinocchioAccountTypeConfusion,
+    /// Two `borrow_mut_*_unchecked()` calls on the same account whose
+    /// lifetimes overlap. RefCell normally catches this; the unchecked
+    /// variants bypass the check.
+    PinocchioMutableBorrowAliasing,
+    /// `accounts[N]` used after length check but without owner or
+    /// type verification — fast-path style without discriminator
+    /// guarding.
+    PinocchioPositionWithoutTypeTag,
+    /// `IndexedDataSlice` with `OFFSET + N > min_account_size` — short
+    /// account triggers panic or partial read.
+    PinocchioOffsetOverrun,
+    /// Account treated as program-owned PDA but no `find_program_address`
+    /// derivation reachable in the handler.
+    PinocchioMissingPdaVerification,
+    /// SAFETY comment claims invariant X, agent's CF read can't find X
+    /// enforced. Highest-signal Pinocchio probe — explicitly weaponizes
+    /// the authors' own preconditions.
+    PinocchioStaleSafetyComment,
+    /// Miri-detected UB on host disagrees with Mollusk's runtime
+    /// outcome — typically Miri-fail with Mollusk-pass. Surfaced as
+    /// Critical because the deployed `.so`'s release-mode wrap +
+    /// sBPF alignment hides UB the host interpreter exposes.
+    ExecutionDivergence,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 #[allow(dead_code)] // Low used by upcoming categories
 pub enum Severity {
@@ -149,6 +188,41 @@ pub enum Reproducer {
         /// filling the TODOs.
         needs_fill: bool,
     },
+    /// Pinocchio probe (v2.19): structured prompt the audit subagent
+    /// expands into a Mollusk-driven Rust test the user can run. The
+    /// CLI emits the prompt + substitution map; the agent writes the
+    /// actual `repro.rs` body. Mirrors the `Sandbox { needs_fill: true }`
+    /// flow but is template-driven (one markdown per probe) rather
+    /// than codegen-emitted.
+    MolluskPrompt {
+        /// Path to the markdown template under
+        /// `references/probes/pinocchio/<probe>.md#reproducer`.
+        template_path: String,
+        /// Per-finding values the agent substitutes into the template
+        /// (e.g. `${HANDLER}` → `process_transfer`).
+        substitutions: std::collections::BTreeMap<String, String>,
+        /// Where the agent writes the filled repro. Relative to the
+        /// project root: `.qed/probes/pinocchio/<finding-id>/repro_mollusk.rs`.
+        repro_path: String,
+    },
+    /// Pinocchio Miri repro (v2.19): structured prompt for a direct
+    /// handler-call test (no SVM) that exercises the unsafe path
+    /// under `cargo +nightly miri test`. Catches the UB class
+    /// (aliasing, OOB, overflow, uninit, invalid transmute) that
+    /// Mollusk's SVM-level execution can't see.
+    MiriPrompt {
+        template_path: String,
+        substitutions: std::collections::BTreeMap<String, String>,
+        repro_path: String,
+        /// G1 — adversarial inputs derived from the site's SAFETY
+        /// comment clauses. Each entry is a SAFETY claim the agent
+        /// negates in the generated test.
+        adversarial_inputs: Vec<AdversarialInput>,
+        /// G3 — invariant assertions the agent brackets the handler
+        /// call with (conservation, distinctness, owner-write).
+        /// Selected from `_harness/invariants.rs`.
+        invariant_asserts: Vec<String>,
+    },
     /// Coverage-guided fuzz crash discovered by Crucible (v2.18). The
     /// reproducer is the on-disk crash blob produced by `crucible run`
     /// plus the minimized action sequence after auto-`tmin`. Run
@@ -178,6 +252,25 @@ pub enum Reproducer {
         /// surfaces as a version mismatch rather than silent drift.
         crucible_version: String,
     },
+}
+
+/// One adversarial input the agent writes into a Miri reproducer (v2.19
+/// G1). Each entry corresponds to a SAFETY-comment clause we want the
+/// generated test to negate.
+#[derive(Debug, Clone, Serialize)]
+pub struct AdversarialInput {
+    /// Verbatim SAFETY-comment clause this input attacks.
+    pub claim_text: String,
+    /// Symbolic strategy identifier — keyed to a builder in
+    /// `examples/pinocchio-fixtures/_harness/adversarial.rs`.
+    /// Known strategies: `alias_buffer`, `short_buffer`, `swap_position`,
+    /// `uninit_init_flag`, `foreign_owner`, `short_balance`,
+    /// `oversized_amount`.
+    pub negation_strategy: String,
+    /// What the test should observe under the negated input — either
+    /// the handler returning `Err`, Miri flagging UB, or "either" when
+    /// both outcomes satisfy the claim.
+    pub expected_outcome: String,
 }
 
 /// Replica of Crucible's on-disk `<hash>.meta.json` shape — we don't pull
@@ -253,6 +346,14 @@ pub enum Runtime {
     /// Categories collapse to user-owned-handler-body + Quasar-specific
     /// drift / unanchored-field / bounty-intent shapes.
     QedgenCodegen,
+    /// Pinocchio (no_std, hand-rolled `unsafe` serde). Identified by
+    /// `pinocchio` Cargo dep. Audit obligations differ in kind: every
+    /// safety check Anchor's framework discharges automatically (owner,
+    /// init, length, discriminator, alias) is the program author's
+    /// responsibility. v2.19 routes to pinocchio_probe.rs which
+    /// enumerates `unsafe` serde sites + parsed SAFETY comments for
+    /// the auditor subagent.
+    Pinocchio,
     /// Detection inconclusive — auditor falls back to source-walking.
     Unknown,
 }
@@ -413,6 +514,25 @@ pub fn run_bootstrap(project_root: &Path) -> Result<ProbeOutput> {
     })
 }
 
+/// Public wrapper exposed to main.rs for the v2.19 `qedgen probe
+/// --program <path>` dispatcher. Keeps the internal `detect_runtime`
+/// signature intact so the rest of the probe module isn't disturbed.
+pub fn detect_runtime_public(root: &Path) -> Runtime {
+    detect_runtime(root)
+}
+
+/// Public wrapper for v2.19.
+pub fn applicable_categories_public(runtime: &Runtime) -> Vec<String> {
+    applicable_categories(runtime)
+}
+
+/// Public accessor for the SCHEMA_VERSION constant — exposed so the
+/// v2.19 Pinocchio dispatcher emits envelopes with the canonical
+/// version number rather than hard-coding a duplicate.
+pub fn schema_version() -> u32 {
+    SCHEMA_VERSION
+}
+
 /// Runtime detection by filesystem heuristics. Order matters: a project
 /// with both `Anchor.toml` and `solana-program` dep is Anchor.
 fn detect_runtime(root: &Path) -> Runtime {
@@ -445,6 +565,12 @@ fn detect_runtime(root: &Path) -> Runtime {
     let cargo = root.join("Cargo.toml");
     if cargo.exists() {
         let content = std::fs::read_to_string(&cargo).unwrap_or_default();
+        // Pinocchio: pre-empt Anchor/Native checks because a Pinocchio
+        // crate may also list `solana-program` as a transitive dep; the
+        // `pinocchio` dep is the canonical signal.
+        if has_pinocchio_dep(&content) {
+            return Runtime::Pinocchio;
+        }
         if content.contains("quasar-lang") {
             // Distinguish hand-written Quasar from qedgen-codegen output:
             // codegen leaves a `formal_verification/` dir, a `qed.toml`,
@@ -465,6 +591,33 @@ fn detect_runtime(root: &Path) -> Runtime {
     }
 
     Runtime::Unknown
+}
+
+/// Pinocchio dep check. Matches `pinocchio = ...`, `pinocchio = {...}`, or
+/// `pinocchio-token`/`pinocchio-system` siblings under `[dependencies]`.
+/// Robust against workspace.dependencies redirection — that ships as a
+/// `pinocchio.workspace = true`-style line which the substring check
+/// also catches.
+fn has_pinocchio_dep(cargo_toml: &str) -> bool {
+    for line in cargo_toml.lines() {
+        let t = line.trim();
+        if t.starts_with('#') {
+            continue;
+        }
+        // `pinocchio` as a standalone crate name in the dep position.
+        // Matches: `pinocchio = "0.x"`, `pinocchio = { ... }`,
+        // `pinocchio.workspace = true`, `pinocchio-token = ...` (any
+        // sibling triggers — sibling crates require the root pinocchio
+        // primitive surface).
+        if let Some(after) = t.strip_prefix("pinocchio") {
+            // accept the bare crate `pinocchio` (followed by `=`, `.`,
+            // or `-` for sibling crates).
+            if after.starts_with(['=', '.', '-', ' ']) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Did codegen run against this crate? Three independent signals; any
@@ -582,6 +735,20 @@ fn applicable_categories(runtime: &Runtime) -> Vec<String> {
         "creator_admin_outside_quorum",
         "signer_set_pinned_to_creator_pda_only",
     ];
+    // Pinocchio surface — every Anchor-framework-discharged obligation
+    // is now author-side. See references/probes/pinocchio/*.md for the
+    // full catalog.
+    let pinocchio_specific = [
+        "pinocchio_unchecked_account_load",
+        "pinocchio_unchecked_amount_arith",
+        "pinocchio_unchecked_lamport_arith",
+        "pinocchio_account_type_confusion",
+        "pinocchio_mutable_borrow_aliasing",
+        "pinocchio_position_without_type_tag",
+        "pinocchio_offset_overrun",
+        "pinocchio_missing_pda_verification",
+        "pinocchio_stale_safety_comment",
+    ];
 
     match runtime {
         Runtime::Anchor | Runtime::Native => universal
@@ -604,6 +771,12 @@ fn applicable_categories(runtime: &Runtime) -> Vec<String> {
         Runtime::QedgenCodegen => quasar_handler_body
             .iter()
             .chain(quasar_specific.iter())
+            .chain(multi_actor.iter())
+            .map(|s| s.to_string())
+            .collect(),
+        Runtime::Pinocchio => universal
+            .iter()
+            .chain(pinocchio_specific.iter())
             .chain(multi_actor.iter())
             .map(|s| s.to_string())
             .collect(),
@@ -1828,5 +2001,78 @@ quasar-lang = "0.1"
             matches!(r, Runtime::QedgenCodegen),
             "expected QedgenCodegen, got {r:?}"
         );
+    }
+
+    #[test]
+    fn detect_runtime_classifies_pinocchio_from_cargo_dep() {
+        use std::fs;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
+name = "demo"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pinocchio = "0.6"
+pinocchio-token = "0.3"
+"#,
+        )
+        .expect("write");
+        fs::create_dir_all(root.join("src")).expect("mkdir");
+        fs::write(root.join("src").join("lib.rs"), "").expect("write");
+        let r = detect_runtime(root);
+        assert!(
+            matches!(r, Runtime::Pinocchio),
+            "expected Pinocchio, got {r:?}"
+        );
+    }
+
+    #[test]
+    fn detect_runtime_pinocchio_preempts_solana_program_dep() {
+        // A real Pinocchio program may transitively depend on
+        // solana-program. The Pinocchio dep should take precedence.
+        use std::fs;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
+name = "demo"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pinocchio = "0.6"
+solana-program = "1.18"
+"#,
+        )
+        .expect("write");
+        fs::create_dir_all(root.join("src")).expect("mkdir");
+        fs::write(root.join("src").join("lib.rs"), "").expect("write");
+        let r = detect_runtime(root);
+        assert!(
+            matches!(r, Runtime::Pinocchio),
+            "expected Pinocchio (not Native), got {r:?}"
+        );
+    }
+
+    #[test]
+    fn applicable_categories_for_pinocchio_includes_runtime_specific() {
+        let cats = applicable_categories(&Runtime::Pinocchio);
+        assert!(
+            cats.iter().any(|c| c == "pinocchio_unchecked_amount_arith"),
+            "Pinocchio applicable_categories missing unchecked_amount_arith: {:?}",
+            cats
+        );
+        assert!(
+            cats.iter().any(|c| c == "pinocchio_stale_safety_comment"),
+            "Pinocchio applicable_categories missing stale_safety_comment: {:?}",
+            cats
+        );
+        // Universal categories should still be present.
+        assert!(cats.iter().any(|c| c == "missing_signer"));
     }
 }

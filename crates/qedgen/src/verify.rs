@@ -61,6 +61,11 @@ pub struct VerifyOpts {
     pub lean: bool,
     pub lean_dir: PathBuf,
     pub fail_fast: bool,
+    /// v2.19: run Miri repros under `.qed/probes/pinocchio/*/repro_miri.rs`.
+    pub miri: bool,
+    /// Project root for Miri repro discovery (typically the spec's
+    /// parent dir).
+    pub project_root: PathBuf,
 }
 
 pub fn run(opts: &VerifyOpts) -> Result<VerifyReport> {
@@ -92,6 +97,18 @@ pub fn run(opts: &VerifyOpts) -> Result<VerifyReport> {
 
     if opts.lean {
         let report = run_lean(&opts.lean_dir);
+        let failed = matches!(report.status, BackendStatus::Failed);
+        backends.push(report);
+        if failed && opts.fail_fast {
+            return Ok(VerifyReport {
+                spec: opts.spec.clone(),
+                backends,
+            });
+        }
+    }
+
+    if opts.miri {
+        let report = crate::miri_verify::run(&opts.project_root);
         let failed = matches!(report.status, BackendStatus::Failed);
         backends.push(report);
         if failed && opts.fail_fast {
