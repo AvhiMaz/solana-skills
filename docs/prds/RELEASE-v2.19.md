@@ -156,6 +156,39 @@ The probe envelope's new `clusters[]` field appears only when
 flag see the unchanged envelope. Cluster schema documented in the
 SCOPING-v2.19-scaffold-to-spec.md design doc.
 
+### Auditor §3c — Trust-surface dep walk
+
+Third cross-cutting walk added to the auditor SKILL alongside the
+existing 3a (coverage-of-safe-utility) and 3b (per-role
+identity-anchoring) passes. Runs only when the program leans on a
+small security-critical dep (signature schemes, ZK verifiers, VRFs,
+commitments, hand-rolled hash constructions). Recognition gate:
+small/niche dep whose API surface includes verb-shaped names
+(`sign`, `verify`, `prove`, `commit`, `recover_pubkey`,
+`verify_proof`, `aggregate`), program README cites the primitive
+by name as a security feature, and tests exercise the program
+rather than the primitive directly. Widely-deployed deps
+(`solana-program`, `spl-token`, `anchor-lang`, `pinocchio`,
+`solana-sdk`, `mollusk-svm`) stay trust-boundary axioms.
+
+Workflow: locate the trust claim from the dep's docs → list failure
+modes for the primitive's class (via the new
+`skills/qedgen-auditor/references/trust_surface_primitives.md` —
+per-class checklists for hash-based OTS, Schnorr/EdDSA, BLS,
+threshold sigs, Pedersen/KZG, Merkle, ZK verifiers, VRFs, custom
+hash constructions) → open the dep's source and compare scheme
+against canonical reference → flag any structural delta or surface
+as inconclusive. The references file accretes one class per
+novel-primitive audit; the SKILL itself encodes only the
+class-agnostic process.
+
+Catches bugs in primitives the program treats as axiomatic. The
+program may be 100% correct against the catalog and the 3a/3b
+walks while still being drainable because the library it trusts
+is broken at the algorithmic level (e.g., signature schemes
+missing checksum digits, commitments without binding under the
+chosen hash, ZK verifiers that accept malleable proofs).
+
 ## Migration
 
 No breaking changes — every addition is additive behind opt-in flags.
@@ -166,6 +199,10 @@ No breaking changes — every addition is additive behind opt-in flags.
   `.claude/skills/qedgen-auditor/SKILL.md`) has a new step 6 that
   documents the interview flow; the legacy silent-scaffold path still
   applies for sBPF / exotic runtimes the extractor doesn't cover.
+- Auditor §3c trust-surface dep walk runs only when the recognition
+  gate fires (small/niche security-critical dep). Audits on programs
+  whose security model rests entirely on widely-deployed framework
+  deps skip §3c at zero cost.
 
 ## Pre-release validation
 

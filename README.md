@@ -88,6 +88,17 @@ qedgen verify
 #    `qedgen-auditor` agent skill, or run spec-aware against an
 #    existing .qedspec for category-coverage findings.
 qedgen probe --spec my_program.qedspec
+
+# 6. Drive a scaffold-to-spec interview (v2.19) — probe with
+#    --emit-spec-candidates writes interview.md / clusters.json /
+#    skeleton.qedspec under .qed/audit/<ts>/; the auditor agent
+#    surfaces the interview, you check accept/narrow/reject/bug
+#    per cluster, then ratify merges the chosen clauses into a
+#    parseable .qedspec.
+qedgen probe --program ./my_program --emit-spec-candidates \
+  --audit-dir .qed/audit/2026-05-16
+qedgen ratify --audit-dir .qed/audit/2026-05-16 \
+  --out my_program.qedspec
 ```
 
 `.qed/config.json` pins the spec location so subsequent commands don't need

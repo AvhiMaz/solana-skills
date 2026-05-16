@@ -136,9 +136,11 @@ MEDIUM and below: a repro is encouraged but not required.
      for each one, ask "could this shape happen here?"
    - Classify: real-vulnerability / spec-gap / suppressed.
 
-   **Two cross-cutting passes MUST run alongside the per-category walk.**
+   **Three cross-cutting passes MUST run alongside the per-category walk.**
    These catch primitives the per-category checklist misses on a cold
-   read.
+   read. 3a and 3b run on every audit; 3c runs only when the program
+   leans on a small security-critical dep (see its "When to run it"
+   gate).
 
    **3a. Coverage-of-safe-utility walk.** For every protective
    helper that the codebase defines — names of the shape
@@ -191,6 +193,78 @@ MEDIUM and below: a repro is encouraged but not required.
    exists yet to anchor a coverage walk against. Even if every
    per-category check came up clean, a labeled-but-unanchored
    role is still a vulnerability.
+
+   **3c. Trust-surface dep walk.** Programs that lean on a small
+   library for a security-critical primitive (signature schemes,
+   commitments, ZK verifiers, VRFs, custom merkle helpers, threshold
+   aggregators, hash-based constructions, etc.) have an attack surface
+   that lives in the dep, not in the program's own `.rs` files. The
+   per-category catalog and 3a/3b walks all stop at the program crate
+   boundary. This walk explicitly steps across it.
+
+   When to run it: any time the program calls into a dep with a verb
+   like `sign`, `verify`, `prove`, `commit`, `recover_pubkey`,
+   `derive_pubkey`, `verify_proof`, `aggregate`, `decommit` and trusts
+   the return value for authorization, state transition, or fund
+   movement. Recognition signals:
+
+   - `Cargo.toml` has a small / niche dep whose API includes
+     verb-shaped names above.
+   - The program's README cites the primitive by name as a security
+     feature ("WOTS for quantum resistance", "Pedersen commitments",
+     "Schnorr aggregation", "Groth16 verifier", "verifiable random
+     function").
+   - The program's tests exercise the *program*, not the primitive
+     directly — meaning the dep's correctness is assumed, not
+     verified by the program's own CI.
+
+   The walk has four steps; run them in order:
+
+   1. **Locate the trust claim.** Read the dep's README, `lib.rs`
+      docstring, or the cited paper / RFC. Extract the one-line
+      property the program is leaning on. ("Existential
+      unforgeability of one-time signatures under chosen-message
+      attack." "Computationally binding commitment." "Soundness of
+      proof-of-knowledge under generic group model.")
+   2. **List the failure modes for that primitive's class.** Generic
+      classes are well-studied; the failure modes are standard.
+      `references/trust_surface_primitives.md` documents the
+      per-class checklist for the classes the corpus has seen so
+      far. If the primitive's class isn't covered there, fall back
+      to first principles: replay, forgery from observed output,
+      key recovery, malleability, parameter mismatch, biased output,
+      side-channel leakage.
+   3. **Open the dep's source and verify, scheme against canonical
+      reference.** Don't read the dep's tests — read its
+      `sign`/`verify`/`prove`/`commit` implementation and compare
+      against the textbook construction. Any structural delta from
+      the canonical algorithm is a candidate finding. Pattern-match
+      against the per-class checklist from step 2.
+   4. **If you can't reach a verdict, surface as inconclusive.** A
+      dep you can't fully verify is a known unknown — record it in
+      the report's "Trust surface" section with the specific
+      uncertainty ("the dep's `verify_proof` calls into an external
+      C library at `crate_x::ffi::bn254_verify` — I couldn't audit
+      that further"). Don't omit it just because you couldn't close
+      it.
+
+   What this catches: bugs in primitives the program treats as
+   axiomatic. The program may be 100% correct against the catalog
+   and the 3a/3b walks while still being drainable because the
+   library it trusts is broken at the algorithmic level.
+   Standard examples: signature schemes missing checksum digits
+   (digit-domination forge), commitments without binding under the
+   chosen hash, ZK verifiers that accept malleable proofs, VRFs that
+   leak the seed via biased output.
+
+   This walk is **deeper** than 3a/3b because it crosses the crate
+   boundary, so reserve it for programs that genuinely lean on a
+   small library. A program that uses `solana-program`, `spl-token`,
+   `anchor-lang`, `pinocchio`, `solana-sdk`, `mollusk-svm`, or any
+   widely-deployed dep doesn't qualify — those are trust-boundary
+   axioms in the QEDGen sense (see "What you do NOT do"). The
+   threshold is "small library, niche claim, security property the
+   program rests on, not yet a battle-tested standard."
 
 4. **Escalate every real-vuln finding before writing it up.** This is
    where the bear-hug lives — finding the kill-chain, not just the

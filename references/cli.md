@@ -342,31 +342,78 @@ $QEDGEN verify --spec my_program.qedspec --check-upstream --offline
 ### `probe`
 Probe a `.qedspec` for category-coverage gaps (spec-aware mode) or
 walk a brownfield project root and emit a per-handler work list
-(spec-less / `--bootstrap` mode). Output is JSON, consumed by the
-auditor subagent. Spec-aware emits `findings`; spec-less emits
-`runtime`, `handlers`, `applicable_categories`. v2.16 schema bumps
-to `version: 2` with the addition of an optional `reproducer` field
-on findings (drop-on-fail pipeline; findings without a confirmed
-reproducer are silently dropped — see
-`feedback_probes_reproducible_only.md`).
+(spec-less / `--bootstrap` / `--program` mode). Output is JSON,
+consumed by the auditor subagent. Spec-aware emits `findings`;
+spec-less emits `runtime`, `handlers`, `applicable_categories`.
+v2.16 schema bumps to `version: 2` with the addition of an optional
+`reproducer` field on findings (drop-on-fail pipeline; findings
+without a confirmed reproducer are silently dropped — see
+`feedback_probes_reproducible_only.md`). v2.19 schema bumps to
+`version: 3` when `--emit-spec-candidates` is set, adding a
+`clusters[]` array that the auditor subagent surfaces through the
+scaffold-to-spec interview.
 
 ```bash
 # Spec-aware
 $QEDGEN probe --spec my_program.qedspec
 
-# Spec-less / brownfield
+# Spec-less / brownfield (generic alias)
 $QEDGEN probe --bootstrap --root programs/my_program
+
+# Spec-less / brownfield (Pinocchio-aware alias — same envelope when
+# the detected runtime is pinocchio, plus the site catalogue)
+$QEDGEN probe --program programs/my_program
+
+# v2.19 — emit candidate spec clauses for the scaffold-to-spec
+# interview; companion `qedgen ratify` reads what's written to
+# --audit-dir to produce the final .qedspec.
+$QEDGEN probe --program programs/my_program \
+              --emit-spec-candidates \
+              --audit-dir .qed/audit/2026-05-16
 ```
 
 | Flag | Type | Default | Description |
 |---|---|---|---|
-| `--spec` | Path | optional | Path to `.qedspec` (spec-aware mode) — conflicts with `--bootstrap` |
+| `--spec` | Path | optional | Path to `.qedspec` (spec-aware mode) — conflicts with `--bootstrap` and `--program` |
 | `--bootstrap` | bool | false | Spec-less mode — walk a project root and emit the auditor work list. Requires `--root`. |
 | `--root` | Path | optional | Project root for spec-less mode (the program crate dir) |
+| `--program` | Path | optional | v2.19 user-facing alias for `--bootstrap --root <path>` (the Pinocchio-shape probe entry point; auto-routes via `Cargo.toml` detection so the same flag works for Anchor / native crates too, falling back to the generic spec-less envelope when not Pinocchio) |
+| `--runtime` | enum | auto | Override runtime detection. Values: `pinocchio`, `anchor`, `quasar`, `native`, `sbpf`. Only `pinocchio` has dedicated probe output today; the others fall back to the generic bootstrap envelope. |
+| `--emit-spec-candidates` | bool | false | v2.19 — lift findings into candidate spec clauses (clusters) the auditor subagent surfaces through the scaffold-to-spec interview. Schema bumps to v3 with a `clusters[]` field. v2-shape consumers see no change when the flag is off. |
+| `--audit-dir` | Path | optional | v2.19 — when paired with `--emit-spec-candidates`, write the full audit working set (`interview.md`, `clusters.json`, `skeleton.qedspec`) to this directory. Companion `qedgen ratify --audit-dir <path>` consumes the three files to produce the final spec. Conventionally `.qed/audit/<timestamp>/`. |
 | `--fuzz` | u64 | none | Wall-clock seconds. Runs the coverage-guided fuzz engine alongside (or instead of) the pattern-match predicates. Requires `--spec`. Findings come back in the same `findings[]` with `category: crucible_fuzz_crash` and a `Reproducer::Crucible`. |
 | `--harness-dir` | Path | `./fuzz/<prog>/` | Crucible harness directory. Matches `codegen --crucible` output. |
 | `--no-smoke` | bool | false | Skip the 30s smoke pre-flight that stops early on high-rate duplicate findings. |
 | `--stateful` | bool | false | Stateful action-chain mode. Higher throughput, longer crash chains. |
+
+### `ratify`
+v2.19 — consume the working set emitted by `qedgen probe
+--emit-spec-candidates --audit-dir <path>` (an `interview.md` checked
+by the user, a `clusters.json`, and a `skeleton.qedspec`) and produce
+the final `.qedspec`. Decisions on `interview.md` route as follows:
+
+- `[x] accept` → cluster's candidate clause merged into the handler
+  body or top-level invariant set of the output `.qedspec`.
+- `[x] narrow` → clause emitted per-handler instead of program-wide.
+- `[x] reject` → cluster dropped from the spec, but appended to
+  `<project_root>/.qed/plan/scoping.md` with the user's rationale
+  (the rejected-decision log).
+- `[x] bug` → emitted as a finding file under
+  `<project_root>/.qed/findings/scaffold-to-spec-<id>.md`. Used when
+  the implicit precondition the cluster surfaced is a real
+  missing-enforcement bug, not a spec gap.
+
+```bash
+$QEDGEN ratify --audit-dir .qed/audit/2026-05-16 \
+              --out my_program.qedspec
+```
+
+| Flag | Type | Default | Description |
+|---|---|---|---|
+| `--audit-dir` | Path | required | Directory previously written by `probe --emit-spec-candidates --audit-dir`. Must contain `interview.md`, `clusters.json`, `skeleton.qedspec`. |
+| `--out` | Path | derived | Output path for the generated `.qedspec`. Defaults to `<project_root>/<project_name>.qedspec`, derived from the audit-dir grandparent. |
+| `--scoping-out` | Path | `<project_root>/.qed/plan/scoping.md` | Override the rejected-cluster scoping-notes path (append-on-write). |
+| `--findings-dir` | Path | `<project_root>/.qed/findings/` | Override the directory bug-flagged cluster findings are written to. |
 
 ## Code generation
 
