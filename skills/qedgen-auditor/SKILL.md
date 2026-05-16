@@ -136,6 +136,62 @@ MEDIUM and below: a repro is encouraged but not required.
      for each one, ask "could this shape happen here?"
    - Classify: real-vulnerability / spec-gap / suppressed.
 
+   **Two cross-cutting passes MUST run alongside the per-category walk.**
+   These catch primitives the per-category checklist misses on a cold
+   read.
+
+   **3a. Coverage-of-safe-utility walk.** For every protective
+   helper that the codebase defines — names of the shape
+   `verify_*`, `check_*`, `assert_*`, `validate_*`, `*_in_place`,
+   `safe_*`, `must_*` — list every call site, then list every
+   handler that touches the SAME primitive WITHOUT calling the
+   helper. The existence of a safe utility is itself a signal
+   that the codebase considers the unsafe variant a bug; any
+   handler that should use the safe one but doesn't is a finding
+   by code-symmetry alone — no spec, no audit report, no git
+   history needed.
+
+   The pattern: list the codebase's safe utilities first (e.g.
+   `grep -E 'fn (verify|check|assert|validate)_'` over the
+   program sources), then for each utility identify the primitive
+   it guards. Walk every handler and grep for the primitive's
+   syntactic shape — a parameter name, an account-data unpack,
+   a CPI call structure. Any occurrence without the matching
+   guard is a candidate finding.
+
+   This walk catches the "fix landed here but not there" class —
+   common after a patch that addressed one handler but left
+   adjacent ones untouched. ~5 minutes added per program; high
+   signal-to-noise.
+
+   **3b. Per-role identity-anchoring walk.** Run this once per
+   handler at the end of the per-category walk. For every named
+   principal in the handler's account list —
+   `<role>_token_account`, `<role>_recipient`, `<role>_authority`,
+   `<role>_destination`, `<role>_vault`, etc. — ask:
+
+   > Is `<role>`'s identity anchored to something the program
+   > controls — a stored field on a program-owned PDA, a signer
+   > check on the role itself, a canonical PDA derivation that
+   > includes the role's pubkey as a seed — or is it just labeled
+   > in the handler signature and otherwise free-floating?
+
+   If the role is labeled-and-assumed, the parameter is forgeable.
+   The most common shape is an SPL token account named after a
+   role whose `owner` byte-range (bytes 32..64 of the token account
+   data) is never compared to the role's pubkey — covered by
+   `token_account_role_anchoring`. Other shapes include a
+   `<role>_destination` Pubkey that's never asserted equal to a
+   stored field on the role's PDA (see
+   `field_chain_missing_root_anchor`), or an authority parameter
+   whose pubkey is never matched against a stored
+   `<state>.authority` field.
+
+   This walk catches primitives at PRE-FIX, where no safe utility
+   exists yet to anchor a coverage walk against. Even if every
+   per-category check came up clean, a labeled-but-unanchored
+   role is still a vulnerability.
+
 4. **Escalate every real-vuln finding before writing it up.** This is
    where the bear-hug lives — finding the kill-chain, not just the
    primitive. For each finding classified as "real vulnerability",
@@ -395,12 +451,250 @@ whose **runtime `owner` field** (the program that owns the account
 on Solana) is not validated against the expected program. A token
 account from program X is interchangeable with one from program Y
 until the owner is checked.
+
+**Scope clarification:** this category covers the SOLANA RUNTIME
+account-owner field (i.e., `account.owner == &expected_program_id`).
+It does NOT cover the SPL token account's internal `owner` byte-range
+(the wallet that controls a token account), which is a separate
+finding class — see `token_account_role_anchoring` below.
+
 - **Anchor:** raw `AccountInfo<'info>` field used as a token account
   source/destination without an owner=Token-Program constraint. Anchor
   `Account<TokenAccount>` enforces this; raw AccountInfo doesn't.
 - **Native:** any `account.data.borrow()` or struct deserialize
   without first verifying `account.owner == &expected_program_id`.
 - Corpus: typed-account-with-untyped-owner pattern (Neodyme).
+
+### `token_account_role_anchoring` — CRITICAL when authority signs, HIGH when role signs
+For any handler parameter named after a role
+(`recipient_token_account`, `claimant_token_account`,
+`beneficiary_token_account`, `to_token_account`, etc.), the
+program must verify the token account's stored owner field
+(bytes 32..64 of an SPL TokenAccount) equals the role's pubkey.
+Without this anchor, the parameter is **labeled, not anchored** —
+any token account on the same mint passes the standard
+token-program ownership check (`account.owner == &TOKEN_PROGRAM_ID`).
+
+Distinct from `missing_owner_check`: there the question is "does
+Solana's runtime owner field match my program-id expectation?"
+Here the question is "does the SPL token account's recorded
+wallet match the role this parameter is claiming to represent?"
+A fresh auditor walking the catalog from `missing_owner_check`
+sees `verify_owned_by(..., token_program_id)` and ticks the box —
+that's correct for the runtime owner check, wrong for the
+internal-owner-field anchor.
+
+Severity is keyed off who signs:
+- **CRITICAL** when the AUTHORITY signs and the role is passive
+  (revoke / payout / clawback / disbursement shape): authority can
+  redirect the role's tokens to any same-mint token account they
+  control. No victim consent.
+- **HIGH** when the ROLE itself signs (claim / withdraw / redeem
+  shape): the role consents to whatever destination they sign for,
+  so the attack reduces to phishing / malicious-dapp UI rather
+  than direct theft. Still a finding because the program-level
+  guard would prevent the UI-bug case and is one line of code.
+
+Spec-less per-runtime:
+- **Anchor:** for every field named `<role>_token_account` typed
+  as `Account<'info, TokenAccount>` or `AccountInfo`, check the
+  `#[account(...)]` constraints. Either
+  `constraint = <field>.owner == <role>.key()` or
+  `token::authority = <role>` must be present. Missing both →
+  finding.
+- **Native:** look for `Account::unpack(<role>_token_account.data)`
+  or equivalent unpack. The internal `owner` field of the
+  returned struct must be compared to the role's pubkey before
+  the account is used as a destination/source. Helper-function
+  presence (e.g. names like `verify_token_account_owner`,
+  `assert_token_account_owner`, `check_ata_owner`) signals the
+  safe form is available; a `verify_owned_by(<account>,
+  token_program_id)` call alone is NOT enough.
+- **Pinocchio:** equivalent shape. `pinocchio_token::state::TokenAccount`
+  or `pinocchio_token_2022::state::TokenAccount` exposes
+  `.owner()`; the owner-field comparison must happen.
+
+- Compose-with-what: see the cookbook entries below. The
+  critical chain is authority-signed-payout + role-token-account-
+  not-anchored = direct theft of role's funds.
+
+- Corpus: OS-SPR-ADV-00 (`solana-program/rewards` revoke
+  handlers, April 2026) — `verify_owned_by(recipient_token_account,
+  token_program.address())` present, internal-owner-field
+  comparison absent. Fixed by adding
+  `verify_token_account_owner(recipient_token_account,
+  recipient.address())` in PR #33.
+
+### `pda_lifecycle_reuse_after_close` — MEDIUM
+A close handler fully deletes a parent PDA (returns lamports to
+zero, leaves the account system-owned) instead of marking it
+permanently closed in place. The PDA address is deterministic
+from its seeds, so a subsequent `create_program_address` /
+`find_program_address` with the same seed tuple succeeds at the
+same address. Dependent ("child") PDAs whose seeds include the
+parent's pubkey survive the close because their addresses are
+likewise deterministic and they reference the parent only by
+pubkey, not by account ownership. When the parent is re-created
+at the same address, the child PDAs become "live" against the
+new parent — carrying forward their pre-close state.
+
+The shape is a state-machine flaw: the program treats "PDA
+closed" and "PDA freshly initialized" as the same external state
+(both are system-owned + empty), so it cannot distinguish "this
+is a new campaign / session / round" from "this is the old one
+reopened" at the address level. Stale-state revival follows.
+
+Three observable signals; flag the finding when all three hold:
+
+1. The close handler fully removes the parent (zeros lamports +
+   reassigns to system program), vs. a close-in-place pattern
+   that retains program ownership + a permanent
+   closed-discriminator byte.
+2. At least one other account family has PDA seeds that include
+   the closing PDA's address (the child's address is stable
+   across parent reopen).
+3. The close handler does NOT enumerate-and-close those
+   dependents — they outlive their parent.
+
+- **Anchor:** `#[account(mut, close = receiver)]` on the parent
+  PDA + at least one child PDA whose seeds reference
+  `parent.key()` + no explicit close of the children in the same
+  handler or a companion. Mitigation: keep the parent
+  program-owned with an explicit `closed` discriminator
+  (e.g. an `AccountType::ParentClosed` variant); reject re-init
+  at the same address.
+- **Native / Pinocchio:** the unsafe form is an explicit close
+  helper (`close_pda_account(parent, ...)` / direct
+  lamport-zeroing + `assign_to(system_program)`) that leaves the
+  address system-owned. The safe form is an in-place close method
+  that flips the parent's first byte to a permanent
+  closed-discriminator while leaving the account program-owned —
+  `create_account` then errors `AccountAlreadyInitialized` on any
+  re-init attempt against the same seeds.
+
+- Compose-with-what: pairs with `init_config_field_unanchored` or
+  any "authority controls re-init seeds" finding to enable a
+  full re-create-with-attacker-friendly-state flow.
+
+- Corpus: OS-SPR-ADV-01 (`solana-program/rewards`
+  `CloseDirectDistribution`, April 2026) — full-delete close
+  allowed re-creation with the same seeds; pre-existing
+  `DirectRecipient` child PDAs (keyed on the parent's pubkey)
+  revived. Fixed in PR #32 by introducing
+  `DirectDistribution::close_in_place` with a
+  `DirectDistributionClosed` permanent-marker discriminator.
+
+### `token_2022_extension_arithmetic_skew` — MEDIUM
+Handler records a nominal token amount into program state — e.g.,
+`config.total_allocated += amount`, `position.deposit = amount`,
+`vault.outstanding = amount` — before or instead of measuring what
+the corresponding `TransferChecked` CPI actually delivered. For
+mints with Token-2022 extensions that modify in-flight transfer
+behavior, the delivered amount differs from the requested amount.
+Recorded state then drifts from the actual vault balance, and any
+downstream invariant that reads the state field as ground truth
+breaks silently.
+
+The canonical case is the `TransferFeeConfig` extension
+(fee-on-transfer mints): the fee is deducted in-flight and the
+destination receives `amount - fee`. The program records
+`amount`; the vault holds `amount - fee`; the gap is the bug.
+Future extensions that further alter in-flight amount (rebasing
+hooks, confidential transfers, scaled-UI tokens) produce the
+same shape.
+
+Three observable signals; flag when all three hold:
+
+1. The handler accepts a mint that is not pinned to a specific
+   extension profile — the program supports `TOKEN_PROGRAM_ID`
+   and/or `TOKEN_2022_PROGRAM_ID` without restricting which
+   Token-2022 extensions are permitted on the mint.
+2. State is updated to `amount` (the requested figure) rather
+   than `actual_amount = post_balance - pre_balance` (a measured
+   delta on the destination token account).
+3. Downstream code reads the state field as if it were ground
+   truth (solvency checks, claim limits, accounting invariants,
+   payout ratios).
+
+- **Anchor:** look for `token::transfer_checked(...)?` or
+  `token_interface::transfer_checked(...)?` immediately followed
+  by `state.<field> += amount` (or `= amount`) rather than a
+  pre/post-balance delta. Also flag if the program accepts
+  Token-2022 mints (`token_program: Program<'info, Token2022>`)
+  without an explicit constraint pinning the allowed extensions.
+- **Native / Pinocchio:** the same shape —
+  `TransferChecked.invoke(...)?` followed by direct field
+  assignment instead of:
+
+  ```rust
+  let pre = get_token_account_balance(dest)?;
+  TransferChecked { ... amount, ... }.invoke()?;
+  let post = get_token_account_balance(dest)?;
+  let actual = post.checked_sub(pre)?;
+  // record `actual`, not `amount`
+  ```
+
+- **When to suppress:** the program explicitly rejects mints with
+  non-trivial extensions at entry (asserts no `TransferFeeConfig`
+  / `TransferHook` / `ConfidentialTransferMint` / `InterestBearingConfig`
+  configured). Catch the explicit rejection in source before
+  suppressing — common forms are an early extension-walk that
+  errors on any disallowed type, or pinning to legacy
+  `TOKEN_PROGRAM_ID` only.
+
+- Corpus: OS-SPR-ADV-02 (`solana-program/rewards`
+  `AddDirectRecipient`, April 2026) — recorded the caller's
+  `amount` directly into `total_allocated` without measuring
+  post-transfer delta. Fee-on-transfer mints underfund the vault
+  relative to recorded state. Fixed in PR #34 with the
+  pre/post-balance pattern.
+
+### `cleanup_incentive_mismatch` — LOW (forward-compat / griefing)
+A close-style handler requires signer X but routes the recovered
+rent to recipient Y, where X ≠ Y AND the signing wallet is the
+only signer required. The only party authorized to invoke the
+cleanup pays the tx fee but receives no rent, so they have no
+economic incentive to invoke. Result: fully-claimed / fully-
+revoked / fully-settled PDAs accumulate on-chain indefinitely,
+stranding rent and leaving ghost state for off-chain readers to
+trip over.
+
+Not a fund-loss finding in isolation, but worth surfacing because:
+- The program models cleanup as someone's responsibility but
+  doesn't align responsibility with reward.
+- Stranded PDAs compound with any later finding that interprets
+  stale state as live (see `pda_lifecycle_reuse_after_close`).
+
+Distinct from `close_account_redirection` (catalog above), which
+catches the WRONG-destination shape (signer-controlled receiver,
+unvalidated). This category catches the MISALIGNED-AGENCY shape:
+destination IS validated against a stored / expected field, but
+no one whose signature is required has a reason to invoke.
+
+- **Anchor:** `#[account(mut, close = receiver)]` where
+  `receiver` ≠ the signing wallet AND no other party with a
+  reason to invoke can also sign. Common shape: `receiver =
+  stored_payer` on a PDA whose only signer is the role
+  (recipient, claimant, beneficiary) that already received the
+  goods.
+- **Native / Pinocchio:** `close_pda_account(pda,
+  recipient_other_than_signer)` with no signer who benefits.
+
+- Suggested-fix shapes:
+  - Make cleanup permissionless once a sentinel condition holds
+    (e.g., `claimed == total`, `expires_at < now`), routing rent
+    to the stored beneficiary regardless of who signs.
+  - OR allow the rent recipient to also initiate the cleanup
+    (`close_handler` accepts either signer).
+  - OR pay the cleanup-signer a small fixed fee from the
+    recovered rent (incentive-aligned but more complex).
+
+- Corpus: OS-SPR-ADV-05 (`solana-program/rewards`
+  `CloseDirectRecipient`, April 2026) — recipient signs, rent
+  goes to `original_payer`. Recipients have no incentive to
+  invoke cleanup; claimed PDAs perpetually open in practice.
+  Fixed in PR #35 by adding a permissionless path once
+  `claimed == total`.
 
 ### `field_chain_missing_root_anchor` — CRITICAL (Cashio shape)
 Spec-less only. **Distinct from `missing_owner_check`** — Anchor's
@@ -808,6 +1102,10 @@ exhaustive; use as a thinking primer, not a checklist.
 | spec_impl_drift_user_owned (body writes a state field the spec doesn't model) | + | downstream guard reads that field | = | unmodeled side-channel that formal verification is blind to (HIGH) |
 | lamport_write_demotion | + | rent-exempt PDA | = | silent rent extraction, downstream rent failure (MED→HIGH) |
 | saturating_by_design (`+=!`) | + | amount-shaped field | = | silent value loss, no error path (MED→HIGH) |
+| token_account_role_anchoring (`<role>_token_account.owner` field not pinned) | + | authority-signed revoke / payout handler | = | authority redirects role's vested-but-unclaimed tokens to any same-mint wallet they control, no victim consent (CRIT) |
+| token_account_role_anchoring | + | claimant-signed claim handler | = | malicious dapp UI tricks the claimant into signing with attacker's ATA in the destination slot → tokens leave the program to the attacker (HIGH, requires victim interaction) |
+| pda_lifecycle_reuse_after_close | + | dependent child PDAs not cascade-closed | = | re-create parent at same seeds revives stale children with carryover state (MED on its own; chains to higher when child state controls funds) |
+| cleanup_incentive_mismatch (signer ≠ rent recipient) | + | program assumes cleanup happens | = | ghost state accumulates on-chain, compounding with any later finding that reads stale state (LOW alone; compounds) |
 
 ## Classification rules
 
@@ -854,6 +1152,38 @@ that's intentionally signer-less; CPI to `spl-associated-token-account`
 which is well-known and verified; saturating-by-design on rent math).
 Action: write a suppression rule to `.qed/probe-suppress.toml` so this
 finding doesn't re-surface on the next run.
+
+### Don't dismiss inconsistent accounting prematurely
+If you find a program-state field whose recorded value disagrees
+with the on-chain effect the program just produced (a balance
+field that doesn't reflect a transfer it issued, a tracker that
+doesn't include a payout it routed, a counter that doesn't tick
+on an action it just performed), don't suppress the finding just
+because some other guard happens to make the inconsistency
+unreachable for an exploit *today*. Two reasons:
+
+1. **Forward-compat risk.** Future refactors that change the
+   blocking guard re-arm the bug silently. The current safety is
+   load-bearing on a guard the next maintainer may not realize
+   exists.
+2. **Cross-reader contract.** Off-chain indexers, downstream
+   programs, and other handlers in the same crate read these
+   fields. They have no way to know the field is "stale by
+   design, currently blocked." Inconsistent on-chain accounting
+   is itself the finding even when the immediate exploit is
+   gated.
+
+Surface as INFO with the framing: *"Field `<F>` records `<X>` but
+the program just produced effect `<Y>`. Currently blocked by
+guard `<G>`, but should be made internally consistent to prevent
+future refactors from re-introducing a divergence."*
+
+Corpus: OS-SPR-SUG-00 (`solana-program/rewards`
+`RevokeMerkleClaim`, April 2026) — `NonVested` revocation paid
+the claimant's vested-but-unclaimed amount without updating
+`MerkleClaim.claimed_amount`. The revocation marker blocked
+re-claim, so no immediate exploit, but the documented field was
+inconsistent with reality. Fixed in PR #32.
 
 ## Output format
 
