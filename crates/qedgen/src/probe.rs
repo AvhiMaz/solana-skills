@@ -413,6 +413,13 @@ pub struct ProbeOutput {
     pub applicable_categories: Option<Vec<String>>,
     /// Findings (spec-aware mode only — spec-less is investigation-by-auditor).
     pub findings: Vec<Finding>,
+    /// v2.19 M1: candidate spec clauses derived from findings + runtime
+    /// signals. Populated only when `--emit-spec-candidates` is set; absent
+    /// otherwise (schema v3 is additive — v2 consumers ignore the field).
+    /// Per-runtime extractors map detected sites to `Cluster` entries; the
+    /// auditor subagent reads these to drive the scaffold-to-spec interview.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clusters: Option<Vec<crate::cluster::Cluster>>,
 }
 
 pub fn run_probe(spec_path: &Path) -> Result<ProbeOutput> {
@@ -465,6 +472,7 @@ pub fn run_probe(spec_path: &Path) -> Result<ProbeOutput> {
         handlers: None,
         applicable_categories: None,
         findings,
+        clusters: None,
     })
 }
 
@@ -511,6 +519,7 @@ pub fn run_bootstrap(project_root: &Path) -> Result<ProbeOutput> {
         handlers: Some(handlers),
         applicable_categories: Some(applicable),
         findings: Vec::new(),
+        clusters: None,
     })
 }
 

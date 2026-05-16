@@ -10,6 +10,7 @@ mod banner;
 mod check;
 mod chumsky_adapter;
 mod chumsky_parser;
+mod cluster;
 mod codegen;
 mod consolidate;
 mod crucible_gen;
@@ -27,15 +28,19 @@ mod interface_gen;
 mod kani;
 mod lean_gen;
 mod miri_verify;
+mod pinocchio_extractor;
 mod pinocchio_probe;
+mod pinocchio_to_spec;
 mod probe;
 mod probe_repro;
 mod project;
+mod prompts;
 mod proofs_bootstrap;
 mod proptest_gen;
 mod qed_lock;
 mod qed_manifest;
 mod ratchet;
+mod ratify;
 mod reconcile;
 mod regen_drift;
 mod rust_codegen_util;
@@ -288,6 +293,58 @@ enum Commands {
         /// into stateful once shallow findings are cleared.
         #[arg(long)]
         stateful: bool,
+
+        /// v2.19 M1: lift findings into candidate spec clauses (clusters)
+        /// the auditor subagent uses to drive the scaffold-to-spec
+        /// interview. Schema v3 — adds `clusters[]` to the probe envelope.
+        /// Off by default; v2-shape consumers see no change.
+        #[arg(long)]
+        emit_spec_candidates: bool,
+
+        /// v2.19 M1.5/M1.7: when `--emit-spec-candidates` is also set,
+        /// materialize the full audit working set into this directory:
+        /// `interview.md` (user-editable prompts), `clusters.json` (the
+        /// full cluster envelope), and `skeleton.qedspec` (the
+        /// pre-interview structural skeleton). The companion
+        /// `qedgen ratify --audit-dir <path>` consumes all three to
+        /// produce the final spec. Conventionally
+        /// `.qed/audit/<timestamp>/`.
+        #[arg(long, requires = "emit_spec_candidates")]
+        audit_dir: Option<PathBuf>,
+    },
+
+    /// Ratify a scaffold-to-spec interview into a `.qedspec` + side-files.
+    ///
+    /// Inverse of `qedgen probe --emit-spec-candidates --audit-dir <X>`.
+    /// Reads the audit working set (`interview.md`, `clusters.json`,
+    /// `skeleton.qedspec`) the user has answered, and emits:
+    ///
+    /// - `<program>.qedspec` — skeleton with the user's accepted clauses
+    ///   merged into handler bodies / top-level invariants.
+    /// - `.qed/plan/scoping.md` — rejected clusters with rationale.
+    /// - `.qed/findings/scaffold-to-spec-<id>.md` — bug-flagged clusters.
+    Ratify {
+        /// Audit working-set directory (the one passed to `probe
+        /// --audit-dir`). Must contain `interview.md`, `clusters.json`,
+        /// and `skeleton.qedspec`.
+        #[arg(long)]
+        audit_dir: PathBuf,
+
+        /// Output path for the generated `.qedspec`. Defaults to
+        /// `<project_root>/<project_name>.qedspec`, derived from the
+        /// audit-dir grandparent.
+        #[arg(long)]
+        out: Option<PathBuf>,
+
+        /// Override the rejected-cluster scoping notes path. Defaults
+        /// to `<project_root>/.qed/plan/scoping.md` (append-on-write).
+        #[arg(long)]
+        scoping_out: Option<PathBuf>,
+
+        /// Override the bug-flagged findings directory. Defaults to
+        /// `<project_root>/.qed/findings/`.
+        #[arg(long)]
+        findings_dir: Option<PathBuf>,
     },
 
     /// Scaffold a .qedspec from an Anchor IDL JSON file.
@@ -1374,6 +1431,8 @@ async fn main() -> Result<()> {
             harness_dir,
             no_smoke,
             stateful,
+            emit_spec_candidates,
+            audit_dir,
         } => {
             // v2.19: --program <path> (with optional --runtime pinocchio)
             // routes through the Pinocchio site enumerator and emits a
@@ -1399,6 +1458,47 @@ async fn main() -> Result<()> {
                 }
                 let catalogue = pinocchio_probe::scan_program(prog_root)?;
                 let findings = pinocchio_probe::findings_from_catalogue(&catalogue);
+                // M1.3+M1.4: when --emit-spec-candidates is set, lift
+                // findings into proto-clauses via the Pinocchio extractor,
+                // then cluster them via the runtime-agnostic algorithm.
+                // Other runtimes (Anchor, Native, Quasar) gain their own
+                // extractors in M3/M4.
+                let clusters = if emit_spec_candidates {
+                    let protos = pinocchio_extractor::extract_proto_clauses(&findings);
+                    Some(cluster::cluster_protos(protos))
+                } else {
+                    None
+                };
+                // M1.5+M1.7+M1.8: when --audit-dir is set, materialize
+                // the full audit working set: interview.md (user prompts),
+                // clusters.json (full envelope for `qedgen ratify`),
+                // skeleton.qedspec (pre-interview structural skeleton).
+                if let (Some(dir), Some(clusters_ref)) =
+                    (audit_dir.as_ref(), clusters.as_ref())
+                {
+                    let program_name = prog_root
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("program")
+                        .to_string();
+                    let now_iso = time::OffsetDateTime::now_utc()
+                        .format(&time::format_description::well_known::Iso8601::DEFAULT)
+                        .unwrap_or_else(|_| "unknown".to_string());
+                    std::fs::create_dir_all(dir)?;
+                    // 1. interview.md
+                    let md = prompts::render_interview(clusters_ref, &program_name, &now_iso);
+                    std::fs::write(dir.join("interview.md"), md)?;
+                    // 2. clusters.json — full envelope; ratify consumes
+                    // this to look up cluster_id → suggested_syntax.
+                    let clusters_json = serde_json::to_string_pretty(clusters_ref)?;
+                    std::fs::write(dir.join("clusters.json"), clusters_json)?;
+                    // 3. skeleton.qedspec — pre-interview structural
+                    // skeleton (handler stubs only).
+                    let skeleton =
+                        pinocchio_to_spec::render_skeleton(prog_root, &program_name)?;
+                    std::fs::write(dir.join("skeleton.qedspec"), skeleton)?;
+                    eprintln!("Wrote audit working set to {}", dir.display());
+                }
                 let output = probe::ProbeOutput {
                     version: probe::schema_version(),
                     mode: probe::Mode::SpecLess,
@@ -1410,6 +1510,7 @@ async fn main() -> Result<()> {
                         &probe::Runtime::Pinocchio,
                     )),
                     findings,
+                    clusters,
                 };
                 // Top-level envelope: include the raw catalogue so the
                 // subagent has both `findings[]` (per-site mapped) and
@@ -1480,6 +1581,7 @@ async fn main() -> Result<()> {
                     handlers: None,
                     applicable_categories: None,
                     findings,
+                    clusters: None,
                 };
                 println!("{}", serde_json::to_string_pretty(&output)?);
                 return Ok(());
@@ -1498,6 +1600,36 @@ async fn main() -> Result<()> {
             };
             let rendered = serde_json::to_string_pretty(&output)?;
             println!("{}", rendered);
+        }
+
+        Commands::Ratify {
+            audit_dir,
+            out,
+            scoping_out,
+            findings_dir,
+        } => {
+            let opts = ratify::RatifyOpts {
+                audit_dir,
+                spec_out: out,
+                scoping_out,
+                findings_dir,
+            };
+            let report = ratify::run(&opts)?;
+            eprintln!(
+                "Ratification complete: {} accepted, {} narrowed, {} rejected, {} flagged-as-bug, {} deferred",
+                report.accepted,
+                report.narrowed,
+                report.rejected,
+                report.flagged_as_bug,
+                report.deferred,
+            );
+            eprintln!("Wrote spec to {}", report.spec_path.display());
+            if report.rejected > 0 {
+                eprintln!("Wrote scoping notes to {}", report.scoping_path.display());
+            }
+            for p in &report.findings_paths {
+                eprintln!("Wrote bug-flagged finding to {}", p.display());
+            }
         }
 
         Commands::Spec { idl, output_dir } => {
