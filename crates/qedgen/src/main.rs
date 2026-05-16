@@ -1,5 +1,6 @@
 mod anchor_adapt;
 mod anchor_check;
+mod anchor_extractor;
 mod anchor_project;
 mod anchor_resolver;
 mod api;
@@ -1247,6 +1248,86 @@ fn format_lint_warning(warning: &check::CompletenessWarning) -> String {
     out
 }
 
+/// Anchor (and Quasar) probe path used by `qedgen probe --program <root>`.
+/// Mirrors the Pinocchio branch's shape: runs the runtime-specific
+/// extractor, clusters proto-clauses, optionally materializes the audit
+/// working set, and prints the schema-v3 envelope. Anchor doesn't emit
+/// per-site findings yet — the auditor SKILL.md handles them at the
+/// agent layer via Read+Grep, while the scaffold-to-spec interview
+/// works off the extractor's clusters directly.
+fn run_anchor_probe(
+    prog_root: &Path,
+    runtime_final: probe::Runtime,
+    emit_spec_candidates: bool,
+    audit_dir: Option<&Path>,
+) -> Result<()> {
+    let applicable = probe::applicable_categories_public(&runtime_final);
+    // Anchor handlers come from the existing IDL-aware enumerator;
+    // empty if the project layout isn't standard (we don't fail —
+    // ratify continues with what it has).
+    let handlers_opt = match probe::run_bootstrap(prog_root) {
+        Ok(bs) => bs.handlers,
+        Err(_) => None,
+    };
+    let clusters = if emit_spec_candidates {
+        let protos = anchor_extractor::extract_proto_clauses(prog_root)?;
+        Some(cluster::cluster_protos(protos))
+    } else {
+        None
+    };
+
+    if let (Some(dir), Some(clusters_ref)) = (audit_dir, clusters.as_ref()) {
+        std::fs::create_dir_all(dir)?;
+        let program_name = prog_root
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("program")
+            .to_string();
+        let now_iso = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Iso8601::DEFAULT)
+            .unwrap_or_else(|_| "unknown".to_string());
+        // 1. interview.md
+        let md = prompts::render_interview(clusters_ref, &program_name, &now_iso);
+        std::fs::write(dir.join("interview.md"), md)?;
+        // 2. clusters.json
+        let cj = serde_json::to_string_pretty(clusters_ref)?;
+        std::fs::write(dir.join("clusters.json"), cj)?;
+        // 3. skeleton.qedspec — reuse anchor_adapt::adapt as the
+        // structural skeleton. If it fails (e.g., non-standard project
+        // layout), fall back to a minimal stub that ratify still
+        // accepts.
+        let skeleton = match anchor_adapt::adapt(prog_root, &std::collections::HashMap::new()) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!(
+                    "warning: anchor_adapt::adapt failed ({}); writing minimal skeleton",
+                    e
+                );
+                format!(
+                    "spec {}\n\ntype State | Init | Active\ntype Error | InvalidArgument\n",
+                    program_name
+                )
+            }
+        };
+        std::fs::write(dir.join("skeleton.qedspec"), skeleton)?;
+        eprintln!("Wrote audit working set to {}", dir.display());
+    }
+
+    let output = probe::ProbeOutput {
+        version: probe::schema_version(),
+        mode: probe::Mode::SpecLess,
+        spec_path: None,
+        project_root: Some(prog_root.display().to_string()),
+        runtime: Some(runtime_final),
+        handlers: handlers_opt,
+        applicable_categories: Some(applicable),
+        findings: Vec::new(),
+        clusters,
+    };
+    println!("{}", serde_json::to_string_pretty(&output)?);
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -1441,16 +1522,36 @@ async fn main() -> Result<()> {
             // audit subagent picks the relevant probe markdown per
             // site kind and writes the reproducer.
             if let Some(prog_root) = &program {
-                let is_pinocchio = matches!(runtime, Some(RuntimeOverride::Pinocchio))
-                    || matches!(
-                        probe::detect_runtime_public(prog_root),
-                        probe::Runtime::Pinocchio
+                let detected = probe::detect_runtime_public(prog_root);
+                let runtime_final = match runtime {
+                    Some(RuntimeOverride::Pinocchio) => probe::Runtime::Pinocchio,
+                    Some(RuntimeOverride::Anchor) => probe::Runtime::Anchor,
+                    Some(RuntimeOverride::Quasar) => probe::Runtime::Quasar,
+                    Some(RuntimeOverride::Native) => probe::Runtime::Native,
+                    Some(RuntimeOverride::Sbpf) => probe::Runtime::Sbpf,
+                    None => detected.clone(),
+                };
+
+                // M3: Anchor (and Quasar) route through anchor_extractor
+                // for scaffold-to-spec interviews. Doesn't emit per-site
+                // findings yet — the auditor SKILL.md handles that via
+                // Read+Grep at the agent layer. Clusters come directly
+                // from source patterns.
+                if matches!(runtime_final, probe::Runtime::Anchor | probe::Runtime::Quasar) {
+                    return run_anchor_probe(
+                        prog_root,
+                        runtime_final,
+                        emit_spec_candidates,
+                        audit_dir.as_deref(),
                     );
-                if !is_pinocchio {
+                }
+
+                if !matches!(runtime_final, probe::Runtime::Pinocchio) {
                     eprintln!(
-                        "warning: --program targets {}, which is not detected as Pinocchio; \
-                         emitting bootstrap envelope only. Pass --runtime pinocchio to force.",
-                        prog_root.display()
+                        "warning: --program targets {} (detected: {:?}); \
+                         emitting bootstrap envelope only. Pass --runtime <name> to force a specific extractor.",
+                        prog_root.display(),
+                        detected,
                     );
                     let output = probe::run_bootstrap(prog_root)?;
                     println!("{}", serde_json::to_string_pretty(&output)?);

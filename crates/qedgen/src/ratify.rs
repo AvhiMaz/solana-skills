@@ -211,7 +211,14 @@ fn merge_into_skeleton(
 
         // Detect the placeholder comment inside a handler — that's
         // where we inject accepted clauses for the current handler.
-        let is_placeholder = line.contains("filled by interview");
+        // Two placeholder shapes are recognized:
+        //   - Pinocchio skeleton: `// accounts, requires, effect,
+        //     transfers — filled by interview`
+        //   - Anchor (from anchor_adapt::adapt): `// TODO: requires`
+        //     (we inject just above the requires-style TODO so the
+        //     clauses appear before any other handler-body placeholder)
+        let is_placeholder =
+            line.contains("filled by interview") || line.trim() == "// TODO: requires";
         if is_placeholder && !placeholder_seen_for_current {
             placeholder_seen_for_current = true;
             if let Some(h) = &current_handler {
