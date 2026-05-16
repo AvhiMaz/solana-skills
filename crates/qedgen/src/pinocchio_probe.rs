@@ -999,14 +999,12 @@ fn adversarial_for(
                 expected_outcome: "miri_ub".to_string(),
             });
         }
-        Category::PinocchioUncheckedAccountLoad => {
-            if out.is_empty() {
-                out.push(AdversarialInput {
-                    claim_text: "implicit precondition: account ownership".to_string(),
-                    negation_strategy: "foreign_owner".to_string(),
-                    expected_outcome: "handler_err".to_string(),
-                });
-            }
+        Category::PinocchioUncheckedAccountLoad if out.is_empty() => {
+            out.push(AdversarialInput {
+                claim_text: "implicit precondition: account ownership".to_string(),
+                negation_strategy: "foreign_owner".to_string(),
+                expected_outcome: "handler_err".to_string(),
+            });
         }
         _ => {}
     }
